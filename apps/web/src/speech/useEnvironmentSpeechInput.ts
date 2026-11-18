@@ -114,8 +114,9 @@ type HookInput = {
 
 /**
  * Microphone audio leaves this device only for the environment the person chose in
- * Voice settings. Nothing is inferred from the primary or the draft's environment, and
- * the recording is abandoned the moment that choice changes or its connection drops.
+ * Voice settings; until then it goes to this machine's own environment. Nothing is inferred
+ * from the primary or the draft's environment, and the recording is abandoned the moment that
+ * choice changes or its connection drops.
  */
 export function useVoiceTranscriptionDestination() {
   const gt = useGT();
