@@ -2856,10 +2856,7 @@ const make = Effect.gen(function* () {
         input.runtimeMode,
         target,
       );
-      const interactionMode = yield* resolveInteractionMode(
-        parent.thread.interactionMode,
-        input.interactionMode,
-      );
+      const interactionMode = parent.thread.interactionMode;
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
       if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
         const project = yield* requireProject(parent.thread.projectId);
@@ -3239,10 +3236,7 @@ const make = Effect.gen(function* () {
                 request.runtimeMode,
                 target,
               );
-              const interactionMode = yield* resolveInteractionMode(
-                parent.thread.interactionMode,
-                request.interactionMode,
-              );
+              const interactionMode = parent.thread.interactionMode;
               yield* assertTargetEnabledForProject(parent, commandId, target);
               const title = threadTitle({
                 parentTitle: parent.thread.title,

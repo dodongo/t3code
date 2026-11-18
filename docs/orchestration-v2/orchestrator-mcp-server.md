@@ -245,8 +245,8 @@ import type {
 } from "@t3tools/contracts";
 ```
 
-For local delegation, provider, model, runtime mode, and interaction mode inherit
-from the parent when omitted. A driver-only target inherits the parent's provider instance
+For local delegation, provider, model, and runtime mode inherit from the parent
+when omitted, and the child always takes the parent's interaction mode. A driver-only target inherits the parent's provider instance
 when it can run child tasks, and otherwise selects an available instance of
 that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
@@ -352,8 +352,8 @@ this binding.
 Pass the task in `message`. Project, model, and modes inherit when omitted;
 workspace does not. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. A new worktree with `startFromOrigin` omitted follows the new-worktree setting. For stacked PRs, use the parent branch as `baseRef` with
-`startFromOrigin: false`. The new thread may not run with broader runtime or
-interaction modes than the caller. As for `delegate_task`, a runtime mode the
+`startFromOrigin: false`. The new thread takes the caller's interaction mode and may not run with a
+broader runtime mode. As for `delegate_task`, a runtime mode the
 provider does not offer is refused, and an inherited or default one steps down
 to the broadest mode it offers. `create_threads` remains the batch option for a
 shared checkout.
@@ -539,8 +539,7 @@ results use the latest assistant content from the final work turn.
 
 - A child runtime mode may stay equal to or become narrower than the parent
   mode. It may not escalate privileges.
-- A child interaction mode may stay equal to or narrow from `default` to
-  `plan`. It may not escalate from `plan` to `default`.
+- A child takes its parent's interaction mode; callers cannot choose one.
 - Thread tools take any thread in the environment as a target. For a thread
   caller, list and search cover one project: its own unless `projectId` is given.
 - A tool that changes another thread needs the calling thread's live run, and
