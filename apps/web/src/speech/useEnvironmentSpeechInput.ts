@@ -394,19 +394,19 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     },
   );
 
-  const start = useStableCallback(async () => {
-    if (latestRef.current.input.disabled || (setup.open && setup.downloading)) return;
+  const start = useStableCallback(async (): Promise<boolean> => {
+    if (latestRef.current.input.disabled || (setup.open && setup.downloading)) return false;
     if (!grantId) {
       if (destination.offerFirstRunSetup && latestRef.current.input.offerSetup !== false)
         await navigate({ to: "/settings/voice", hash: "voice-transcription-destination" });
-      return;
+      return false;
     }
     const request = ++startRequestRef.current;
     const owner = latestRef.current.input.ownerKey;
-    if (!session || !prepared || busyElsewhere) return;
+    if (!session || !prepared || busyElsewhere) return false;
     if (cloudProvider) {
       await session.start(createTarget());
-      return;
+      return true;
     }
     const stillCurrent = () =>
       request === startRequestRef.current &&
@@ -419,20 +419,21 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     try {
       latestStatus = await probeSpeechStatus(prepared, true);
     } catch (error) {
-      if (!stillCurrent()) return;
+      if (!stillCurrent()) return false;
       setQueuedStart(null);
       toastManager.add({
         type: "error",
         title: m(msg("Could not start voice input")),
         description: error instanceof Error ? error.message : String(error),
       });
-      return;
+      return false;
     }
-    if (!stillCurrent()) return;
+    if (!stillCurrent()) return false;
     setStatus({ prepared, value: latestStatus });
     setQueuedStart(null);
     if (latestStatus.supported && latestStatus.state === "missing-model") {
-      return loadSetupCatalog(prepared, latestStatus.modelId, latestStatus.benchmarkTier, request);
+      await loadSetupCatalog(prepared, latestStatus.modelId, latestStatus.benchmarkTier, request);
+      return false;
     }
     if (!latestStatus.supported) {
       toastManager.add({
@@ -440,9 +441,10 @@ export function useEnvironmentSpeechInput(input: HookInput) {
         title: m(msg("Voice input is not available")),
         description: latestStatus.reason,
       });
-      return;
+      return false;
     }
     await session.start(createTarget());
+    return true;
   });
 
   const downloadSetupModel = useStableCallback(async () => {
