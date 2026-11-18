@@ -2814,9 +2814,8 @@ export default function ChatView(props: ChatViewProps) {
         if (!event.repeat) copyActiveThreadReference();
       },
       "voice.cycle": ({ event }) => {
-        if (!isServerThread || activeThreadRef === null) return false;
         if (event.repeat) return;
-        void setVoiceThread(appAtomRegistry, activeThreadRef).then(
+        void setVoiceThread(appAtomRegistry, routeThreadRef).then(
           (saved) =>
             saved &&
             toastManager.add({
@@ -3813,7 +3812,6 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                                 activeThreadModelSelection={activeThread?.modelSelection}
                                 activeProjectId={activeProject?.id ?? null}
-                                projectName={activeProject?.title}
                                 compactThreadUnavailable={compactThreadUnavailable}
                                 compactDisabled={compactDisabled}
                                 resolvedTheme={resolvedTheme}

@@ -49,8 +49,6 @@ interface ComposerPrimaryActionsProps {
   followUpBehavior?: "queue" | "steer";
   canSteer?: boolean;
   alternateShortcutLabel?: string | null;
-  /** Dictation is running; Send finishes it and submits once the transcript lands. */
-  voiceInputActive?: boolean;
   isSendBusy: boolean;
   sendDisabledReason: string | null;
   isEnvironmentUnavailable: boolean;
@@ -64,7 +62,6 @@ interface ComposerPrimaryActionsProps {
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   compactBeforeSendTokens?: number | null;
-  hideCompactToggle?: boolean;
   keepFullHistory?: boolean;
   onToggleKeepFullHistory?: () => void;
 }
@@ -242,7 +239,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   followUpBehavior = "steer",
   canSteer = true,
   alternateShortcutLabel = null,
-  voiceInputActive = false,
   isSendBusy,
   sendDisabledReason,
   isEnvironmentUnavailable,
@@ -256,7 +252,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onPreviousPendingQuestion,
   onInterrupt,
   compactBeforeSendTokens = null,
-  hideCompactToggle = false,
   keepFullHistory = false,
   onToggleKeepFullHistory,
 }: ComposerPrimaryActionsProps) {
@@ -342,10 +337,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             isEnvironmentUnavailable ||
             isSendDisabled ||
             pendingAction.isResponding ||
-            (!voiceInputActive &&
-              (pendingAction.isLastQuestion
-                ? !pendingAction.isComplete
-                : !pendingAction.canAdvance))
+            (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
           }
         >
           {formatPendingPrimaryActionLabel(
@@ -491,7 +483,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <TooltipPopup>{submitTooltip}</TooltipPopup>
     </Tooltip>
   );
-  if (compactTokens === null || hideCompactToggle) {
+  if (compactTokens === null) {
     return withStopButton(
       <>
         {children}
