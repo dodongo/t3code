@@ -38,7 +38,9 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  UsageBudgetStatus,
 } from "@t3tools/contracts";
+import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
 import {
   EnvironmentRequestInvalidError,
   AuthOrchestrationOperateScope,
@@ -225,6 +227,7 @@ import {
 } from "./ComposerAttachmentStrip";
 import { CollapsedComposerStopAction, ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerFooterPrimaryActions } from "./ComposerFooterControls";
+import { ComposerUsageMeters } from "./ComposerUsageMeters";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { buildPullRequestReferenceContext } from "../pullRequest/pullRequestDetail.logic";
@@ -397,6 +400,8 @@ export interface ChatComposerProps {
   canSteer: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
   resumeCompactionTokens: number | null;
+  contextWindow: ContextWindowSnapshot | null;
+  usageBudget: UsageBudgetStatus | null;
   keepFullHistory: boolean;
   onToggleKeepFullHistory: () => void;
   onUsageLimitsCommand?: (() => void) | undefined;
@@ -3845,6 +3850,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 {composerAttachButton && !dictationTakesFooter ? (
                   <div className="me-2">{composerAttachButton}</div>
                 ) : null}
+                {isComposerFooterCompact || dictationTakesFooter ? null : (
+                  <ComposerUsageMeters
+                    contextWindow={props.contextWindow}
+                    budget={props.usageBudget}
+                  />
+                )}
                 <div
                   data-chat-composer-actions="right"
                   data-chat-composer-transition-actions="true"
