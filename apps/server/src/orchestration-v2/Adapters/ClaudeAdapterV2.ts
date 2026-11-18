@@ -269,21 +269,9 @@ function claudePromptCacheTtlMs(
   return undefined;
 }
 
-// Claude caps the window at the model's context, so a setting at or above it never applies.
-// Below that, Claude compacts 33,000 tokens short of the window: Claude Code 2.1.305's
-// getContextUsage reports a 150,000 window as a 117,000 threshold, for every catalog model.
-const CLAUDE_AUTO_COMPACT_RESERVE_TOKENS = 33_000;
-
-// Claude Code's isEnvTruthy.
-function isClaudeEnvTruthy(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
-function claudeAutoCompactThreshold(autoCompactWindow: string, maxTokens: number | null) {
-  const windowTokens = Number(autoCompactWindow);
-  return windowTokens > 0 && (maxTokens === null || windowTokens < maxTokens)
-    ? { autoCompactThreshold: windowTokens - CLAUDE_AUTO_COMPACT_RESERVE_TOKENS }
-    : {};
+interface ClaudeContextLimits {
+  readonly maxTokens: number;
+  readonly autoCompactThreshold?: number;
 }
 
 function claudeMessageInputTokens(usage: {
@@ -308,7 +296,7 @@ export function claudeProviderTurnTokenUsage(
   },
   maxTokens: number | null,
   updatedAt: string,
-  autoCompactWindow = "",
+  autoCompactThreshold?: number,
   requestedAt?: DateTime.Utc,
 ) {
   const inputTokens = claudeMessageInputTokens(usage);
@@ -327,7 +315,7 @@ export function claudeProviderTurnTokenUsage(
     outputTokens,
     reasoningOutputTokens: 0,
     ...(promptCacheTtlMs === undefined ? {} : { promptCacheTtlMs }),
-    ...claudeAutoCompactThreshold(autoCompactWindow, maxTokens),
+    ...(autoCompactThreshold === undefined ? {} : { autoCompactThreshold }),
     ...(promptCacheExpiresAt === undefined ? {} : { promptCacheExpiresAt }),
     updatedAt,
   };
@@ -759,6 +747,8 @@ export interface ClaudeAgentSdkQuerySession {
     ReadonlyArray<ClaudePermissionRule>,
     ClaudeAgentSdkQueryRunnerError
   >;
+  /** The window and auto-compaction threshold Claude Code applies to the session now. */
+  readonly contextLimits: Effect.Effect<ClaudeContextLimits, ClaudeAgentSdkQueryRunnerError>;
   readonly interrupt: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly close: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
@@ -1937,6 +1927,17 @@ export const layerQueryRunner: Layer.Layer<
           try: () => queryRuntime.mcpServerStatus(),
           catch: (cause) => queryRunnerError(cause, "mcpServerStatus"),
         }),
+        contextLimits: Effect.tryPromise({
+          try: () => queryRuntime.getContextUsage({ detail: "summary" }),
+          catch: (cause) => queryRunnerError(cause, "getContextUsage"),
+        }).pipe(
+          Effect.map((usage): ClaudeContextLimits => ({
+            maxTokens: usage.maxTokens,
+            ...(usage.isAutoCompactEnabled && usage.autoCompactThreshold !== undefined
+              ? { autoCompactThreshold: usage.autoCompactThreshold }
+              : {}),
+          })),
+        ),
         readMcpResource: ({ server, uri }) =>
           Effect.tryPromise({
             try: () => queryRuntime.readMcpResource(server, uri),
@@ -3596,16 +3597,6 @@ const decodeClaudeSubagentCacheSettings = Schema.decodeUnknownEffect(
     ),
   ),
 );
-const decodeClaudeCompactSettings = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      autoCompactEnabled: Schema.optionalKey(Schema.Unknown),
-      autoCompactWindow: Schema.optionalKey(Schema.Unknown),
-      modelSettings: Schema.optionalKey(Schema.Unknown),
-    }),
-  ),
-);
-const decodeClaudeCompactWindow = Schema.decodeUnknownOption(Schema.Int);
 const decodeClaudeEnvSettings = Schema.decodeUnknownEffect(
   fromLenientJson(
     Schema.StructWithRest(
@@ -5103,7 +5094,7 @@ interface ActiveClaudeTurnContext {
   unansweredRequestSince?: DateTime.Utc | undefined;
   readonly queryPolicy: ClaudeRuntimeQueryPolicy;
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
-  readonly autoCompactWindow: string;
+  contextLimits: ClaudeContextLimits | undefined;
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
   nativeMessageCursor: string | null;
@@ -5861,72 +5852,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       Effect.map(claudeToolSearchOverride),
     );
 
-  const resolveAutoCompactWindow = Effect.fn("ClaudeAdapterV2.resolveAutoCompactWindow")(function* (
-    cwd: string | null,
-    modelSelection: ModelSelection,
-    launchArgSettings: ClaudeSdkSettings | undefined,
-  ) {
-    // With auto-compaction off Claude never compacts, so there is no threshold to report.
-    for (const name of ["DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"]) {
-      const value = yield* resolveClaudeEnv(cwd, launchArgSettings, name);
-      if (isClaudeEnvTruthy(value)) return "";
-    }
-    const launchEnabled = launchArgSettings?.autoCompactEnabled;
-    let autoCompactEnabled = typeof launchEnabled === "boolean" ? launchEnabled : undefined;
-    for (const settingsFile of yield* settingsFilesByPrecedence(cwd)) {
-      if (autoCompactEnabled !== undefined) break;
-      const settings = yield* fileSystem.readFileString(settingsFile).pipe(
-        Effect.flatMap(decodeClaudeCompactSettings),
-        Effect.orElseSucceed(() => undefined),
-      );
-      if (typeof settings?.autoCompactEnabled === "boolean") {
-        autoCompactEnabled = settings.autoCompactEnabled;
-      }
-    }
-    if (autoCompactEnabled === false) return "";
-    if (adapterOptions.settings.autoCompactWindow !== "")
-      return adapterOptions.settings.autoCompactWindow;
-    const validWindow = (value: unknown) => {
-      const selected = Option.getOrUndefined(decodeClaudeCompactWindow(value));
-      return typeof selected === "number" && selected >= 100_000 && selected <= 1_000_000
-        ? String(selected)
-        : undefined;
-    };
-    // Claude gives CLAUDE_CODE_AUTO_COMPACT_WINDOW precedence over the autoCompactWindow keys.
-    const envValue = yield* resolveClaudeEnv(
-      cwd,
-      launchArgSettings,
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    );
-    const envWindow = envValue === undefined ? undefined : validWindow(Number(envValue));
-    if (envWindow !== undefined) return envWindow;
-    const model = compileClaudeModelSelection(modelSelection).apiModelId.replace(/\[1m\]$/i, "");
-    const windowFrom = (settings: unknown) => {
-      if (typeof settings !== "object" || settings === null) return undefined;
-      const models = Reflect.get(settings, "modelSettings");
-      const modelSetting =
-        typeof models === "object" && models !== null ? Reflect.get(models, model) : undefined;
-      const modelWindow =
-        typeof modelSetting === "object" && modelSetting !== null
-          ? Reflect.get(modelSetting, "autoCompactWindow")
-          : undefined;
-      return modelWindow === "auto"
-        ? ""
-        : (validWindow(modelWindow) ?? validWindow(Reflect.get(settings, "autoCompactWindow")));
-    };
-    const launchWindow = windowFrom(launchArgSettings);
-    if (launchWindow !== undefined) return launchWindow;
-    for (const settingsFile of yield* settingsFilesByPrecedence(cwd)) {
-      const settings = yield* fileSystem.readFileString(settingsFile).pipe(
-        Effect.flatMap(decodeClaudeCompactSettings),
-        Effect.orElseSucceed(() => undefined),
-      );
-      const value = windowFrom(settings);
-      if (value !== undefined) return value;
-    }
-    return "";
-  });
-
   const userInvocableSkills = (cwd: string | null) =>
     discoverClaudeSkills(
       adapterOptions.settings,
@@ -6470,20 +6395,22 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           // Only message_start marks the request start; an assistant snapshot
           // arrives after generation, so it leaves the cache expiry unknown.
           if (requestStarted && context.streamUsage !== null) context.streamUsage.requestedAt = now;
-          const maxTokens = claudeContextWindow(context.input.modelSelection);
+          const maxTokens =
+            context.contextLimits?.maxTokens ?? claudeContextWindow(context.input.modelSelection);
+          const autoCompactThreshold = context.contextLimits?.autoCompactThreshold;
           const tokenUsage =
             typeof usage === "number"
               ? {
                   usedTokens: usage,
                   maxTokens,
-                  ...claudeAutoCompactThreshold(context.autoCompactWindow, maxTokens),
+                  ...(autoCompactThreshold === undefined ? {} : { autoCompactThreshold }),
                   updatedAt: DateTime.formatIso(now),
                 }
               : claudeProviderTurnTokenUsage(
                   usage,
                   maxTokens,
                   DateTime.formatIso(now),
-                  context.autoCompactWindow,
+                  autoCompactThreshold,
                   context.streamUsage?.requestedAt,
                 );
           if (typeof usage !== "number") {
@@ -13321,7 +13248,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }),
             ),
             Effect.ensuring(Deferred.succeed(closed, undefined)),
-            Effect.forkIn(sessionScope),
+            Effect.forkIn(sessionScope, { startImmediately: true }),
           );
           return context;
         });
@@ -13462,14 +13389,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     );
             const querySession = yield* openQuery(turnInput, nativeThreadId, queryPolicy);
             yield* applySessionTitle(querySession.query, nativeThreadId, turnInput.appThread.title);
-            const autoCompactWindow = yield* resolveAutoCompactWindow(
-              querySession.settingsCwd,
-              turnInput.modelSelection,
-              querySession.launchArgSettings,
-            );
             const context: ActiveClaudeTurnContext = {
               input: turnInput,
-              autoCompactWindow,
+              contextLimits: undefined,
               queryPolicy: querySession.queryPolicy,
               nativeThreadId,
               nativeTurnId,
@@ -13551,6 +13473,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     : { cause: querySession.exitCause }),
                 });
               }
+              yield* querySession.query.contextLimits.pipe(
+                Effect.tap((limits) =>
+                  Effect.sync(() => {
+                    context.contextLimits = limits;
+                  }),
+                ),
+                Effect.catch((error) =>
+                  Effect.logWarning("orchestration-v2.claude-context-limits-unavailable", {
+                    nativeThreadId,
+                    error: String(error),
+                  }),
+                ),
+                Effect.forkIn(sessionScope, { startImmediately: true }),
+              );
               if (
                 !isClaudeProviderContinuationTurn(turnInput) &&
                 permissionModeForClaudeRuntimePolicy(turnInput.runtimePolicy) ===

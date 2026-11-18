@@ -956,7 +956,7 @@ describe("ClaudeAdapterV2 context usage", () => {
       },
       null,
       "2026-08-29T00:03:00.000Z",
-      "",
+      undefined,
       DateTime.makeUnsafe("2026-08-29T00:00:00.000Z"),
     );
     assert.strictEqual(usage.promptCacheExpiresAt, "2026-08-29T00:05:00.000Z");
@@ -1150,6 +1150,7 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Effect.void,
@@ -1273,6 +1274,7 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
               readMcpResource: () => Effect.die("unexpected MCP resource read"),
               callMcpTool: () => Effect.die("unexpected MCP tool call"),
               listPermissionRules: Effect.die("unexpected permission rules read"),
+              contextLimits: Effect.never,
               stopTask: () => Effect.void,
               interrupt: Effect.void,
               close: Effect.void,
@@ -1562,6 +1564,7 @@ describe("ClaudeAdapterV2 provider installation gate", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Effect.void,
@@ -1750,6 +1753,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
             readMcpResource: () => Effect.die("unexpected MCP resource read"),
             callMcpTool: () => Effect.die("unexpected MCP tool call"),
             listPermissionRules: Effect.die("unexpected permission rules read"),
+            contextLimits: Effect.never,
             stopTask: () => Effect.void,
             interrupt: Effect.void,
             close: Effect.void,
@@ -1953,6 +1957,7 @@ describe("ClaudeAdapterV2 resume compaction", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Effect.void,
@@ -2343,6 +2348,7 @@ describe("ClaudeAdapterV2 attachments", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Queue.shutdown(messages),
@@ -2885,6 +2891,7 @@ describe("ClaudeAdapterV2 native fork", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Effect.void,
@@ -3234,6 +3241,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Effect.void,
@@ -3578,6 +3586,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       "mcpServerStatus" | "readMcpResource" | "callMcpTool"
     > &
       Partial<Pick<ClaudeAdapterV2.ClaudeAgentSdkQuerySession, "listPermissionRules">>;
+    readonly contextLimits?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["contextLimits"];
     readonly environment?: NodeJS.ProcessEnv;
     readonly onSessionInit?: (cwd: string) => Effect.Effect<void>;
     readonly subagentLaunchToolUseId?: string;
@@ -3718,6 +3727,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: options?.stopTask ?? (() => Effect.void),
                   interrupt: Effect.void,
                   close: Queue.shutdown(processMessages),
@@ -3761,6 +3771,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 callMcpTool:
                   options?.mcp?.callMcpTool ?? (() => Effect.die("unexpected MCP tool call")),
                 listPermissionRules: options?.mcp?.listPermissionRules ?? Effect.succeed([]),
+                contextLimits: options?.contextLimits ?? Effect.never,
                 stopTask: options?.stopTask ?? (() => Effect.void),
                 interrupt: options?.interrupt ?? Effect.void,
                 close: options?.close?.(sdkMessages) ?? Effect.void,
@@ -10222,7 +10233,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   it.effect("merges cumulative stream usage into the message_start counts", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarnessWithOptions({
-        settings: { ...DEFAULT_CLAUDE_SETTINGS, autoCompactWindow: "150000" },
+        contextLimits: Effect.succeed({ maxTokens: 150_000, autoCompactThreshold: 117_000 }),
       });
       yield* harness.runtime.startTurn(
         makeClaudeTestTurnInput({
@@ -10302,155 +10313,34 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect.each([
-    { autoCompactWindow: "", model: "claude-sonnet-4-6", threshold: undefined },
-    { autoCompactWindow: "150000", model: "claude-sonnet-4-6", threshold: 117_000 },
-    { autoCompactWindow: "200000", model: "claude-sonnet-4-6", threshold: undefined },
-    { autoCompactWindow: "650000", model: "claude-sonnet-4-6", threshold: undefined },
-    { autoCompactWindow: "650000", model: "uncatalogued-model", threshold: 617_000 },
     {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      threshold: 467_000,
+      name: "the limits Claude reports",
+      contextLimits: Effect.succeed({ maxTokens: 272_000, autoCompactThreshold: 250_808 }),
+      maxTokens: 272_000,
+      threshold: 250_808,
     },
     {
-      autoCompactWindow: "300000",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      threshold: 267_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      projectSettings: '{"autoCompactWindow":400000}',
-      threshold: 367_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings:
-        '{"autoCompactWindow":500000,"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":450000}}}',
-      threshold: 417_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      projectSettings: '{"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":"auto"}}}',
+      name: "no threshold when auto-compaction is off",
+      contextLimits: Effect.succeed({ maxTokens: 272_000 }),
+      maxTokens: 272_000,
       threshold: undefined,
     },
     {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      launchArgs: `--settings '{"autoCompactWindow":350000}'`,
-      threshold: 317_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":"invalid"}',
-      threshold: undefined,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000,}',
-      threshold: undefined,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{/* invalid */ "autoCompactWindow":500000}',
-      threshold: undefined,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000,"modelSettings":null}',
-      threshold: 467_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      projectSettings: '{"autoCompactWindow":"auto"}',
-      threshold: 467_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":500000}',
-      projectSettings: '{"autoCompactWindow":50000}',
-      threshold: 467_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings:
-        '{"autoCompactWindow":500000,"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":50000}}}',
-      threshold: 467_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"300000"}}',
-      threshold: 267_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      environment: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" },
-      threshold: 267_000,
-    },
-    {
-      autoCompactWindow: "",
-      model: "claude-opus-5-5",
-      userSettings: '{"autoCompactWindow":400000,"autoCompactEnabled":false}',
-      threshold: undefined,
-    },
-    {
-      autoCompactWindow: "400000",
-      model: "claude-opus-5-5",
-      environment: { DISABLE_AUTO_COMPACT: "1" },
+      name: "the catalog window when Claude cannot report its limits",
+      contextLimits: Effect.fail(
+        new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+          method: "getContextUsage",
+          cause: new Error("unsupported"),
+        }),
+      ),
+      maxTokens: 200_000,
       threshold: undefined,
     },
   ])(
-    "ignores stale snapshots after compaction and reports threshold $autoCompactWindow for $model",
-    ({
-      autoCompactWindow,
-      model,
-      threshold,
-      userSettings,
-      projectSettings,
-      launchArgs,
-      environment,
-    }) =>
+    "ignores stale snapshots after compaction and reports $name",
+    ({ contextLimits, maxTokens, threshold }) =>
       Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-compact-" });
-        const project = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-compact-" });
-        if (userSettings !== undefined) {
-          yield* fileSystem.writeFileString(path.join(home, "settings.json"), userSettings);
-        }
-        if (projectSettings !== undefined) {
-          yield* fileSystem.makeDirectory(path.join(project, ".claude"));
-          yield* fileSystem.writeFileString(
-            path.join(project, ".claude", "settings.json"),
-            projectSettings,
-          );
-        }
-        const harness = yield* makeWakeHarnessWithOptions({
-          settings: {
-            ...DEFAULT_CLAUDE_SETTINGS,
-            autoCompactWindow,
-            homePath: home,
-            launchArgs: launchArgs ?? "",
-          },
-          ...(environment === undefined ? {} : { environment }),
-        });
+        const harness = yield* makeWakeHarnessWithOptions({ contextLimits });
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
@@ -10459,11 +10349,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             attemptId: RunAttemptId.make("attempt-snapshot-usage-compaction"),
             text: "Continue.",
             attachments: [],
-            modelSelection: { ...CLAUDE_TEST_MODEL_SELECTION, model },
-            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-              ...CLAUDE_TEST_RUNTIME_POLICY,
-              cwd: project,
-            }),
           }),
         );
         const usage = { ...zeroUsage, input_tokens: 1_000, output_tokens: 75 };
@@ -10492,10 +10377,19 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(
           harness.events.flatMap((event) =>
             event.type === "provider_turn.updated" && event.providerTurn.tokenUsage
-              ? [event.providerTurn.tokenUsage.autoCompactThreshold]
+              ? [
+                  [
+                    event.providerTurn.tokenUsage.maxTokens,
+                    event.providerTurn.tokenUsage.autoCompactThreshold,
+                  ],
+                ]
               : [],
           ),
-          [threshold, threshold, threshold],
+          [
+            [maxTokens, threshold],
+            [maxTokens, threshold],
+            [maxTokens, threshold],
+          ],
         );
       }).pipe(
         Effect.provide(
@@ -10596,44 +10490,26 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("reports the settings directory of a reused Claude query", () =>
+  it.effect("asks a reused Claude query for its limits at each turn", () =>
     Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
-      const first = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-first-" });
-      const second = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-second-" });
-      for (const [directory, window] of [
-        [first, 150_000],
-        [second, 180_000],
-      ] as const) {
-        yield* fileSystem.makeDirectory(path.join(directory, ".claude"));
-        yield* fileSystem.writeFileString(
-          path.join(directory, ".claude", "settings.json"),
-          JSON.stringify({ autoCompactWindow: window }),
-        );
-      }
+      const reported = [
+        { maxTokens: 150_000, autoCompactThreshold: 117_000 },
+        { maxTokens: 180_000, autoCompactThreshold: 147_000 },
+      ];
       const harness = yield* makeWakeHarnessWithOptions({
-        settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: home },
+        contextLimits: Effect.sync(() => reported.shift() ?? { maxTokens: 1 }),
       });
       let firstOptions: ReturnType<typeof harness.getOpenedOptions>;
-      for (const [ordinal, cwd] of [
-        [1, first],
-        [2, second],
-      ] as const) {
+      for (const ordinal of [1, 2]) {
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
-            attemptId: RunAttemptId.make(`attempt-compact-cwd-${ordinal}`),
+            attemptId: RunAttemptId.make(`attempt-context-limits-${ordinal}`),
             providerTurnOrdinal: ordinal,
             text: "Continue.",
             attachments: [],
-            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-              ...CLAUDE_TEST_RUNTIME_POLICY,
-              cwd,
-            }),
           }),
         );
         if (ordinal === 1) firstOptions = harness.getOpenedOptions();
@@ -10665,7 +10541,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ? [event.providerTurn.tokenUsage.autoCompactThreshold]
             : [],
         ),
-        [117_000, 117_000],
+        [117_000, 147_000],
       );
     }).pipe(
       Effect.provide(
@@ -14537,6 +14413,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: isFirstProcess
@@ -14693,24 +14570,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
       prefix: `t3-claude-v2-${name}-`,
     });
-    const deadStreamEnded = yield* Deferred.make<void>();
     let opened = 0;
     const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
       instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_CLAUDE_SETTINGS,
       environment: {},
       attachmentsDir,
-      // startTurn reads the auto-compact window from settings between opening the query and
-      // attaching the turn; holding that read until the CLI's stream has ended pins the race.
-      fileSystem: {
-        ...fileSystem,
-        readFileString: (filePath, encoding) =>
-          opened === 1 && filePath.endsWith("settings.json")
-            ? Deferred.await(deadStreamEnded).pipe(
-                Effect.andThen(fileSystem.readFileString(filePath, encoding)),
-              )
-            : fileSystem.readFileString(filePath, encoding),
-      },
+      fileSystem,
       path: yield* Path.Path,
       random: yield* SecureRandom.SecureRandom,
       idAllocator,
@@ -14723,12 +14589,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             const sdkMessages = yield* Queue.unbounded<SDKMessage>();
             return {
               // The first CLI exits without writing a frame.
-              messages:
-                opened === 1
-                  ? firstQueryExit.pipe(
-                      Stream.ensuring(Deferred.succeed(deadStreamEnded, undefined)),
-                    )
-                  : Stream.fromQueue(sdkMessages),
+              messages: opened === 1 ? firstQueryExit : Stream.fromQueue(sdkMessages),
               offer: () => Effect.void,
               setModel: () => Effect.void,
               applyFlagSettings: () => Effect.void,
@@ -14739,6 +14600,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               readMcpResource: () => Effect.die("unexpected MCP resource read"),
               callMcpTool: () => Effect.die("unexpected MCP tool call"),
               listPermissionRules: Effect.die("unexpected permission rules read"),
+              contextLimits: Effect.never,
               stopTask: () => Effect.void,
               interrupt: Effect.void,
               close: Queue.shutdown(sdkMessages),
@@ -14951,6 +14813,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Queue.shutdown(queue),
@@ -18344,6 +18207,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 interrupt: Effect.void,
                 close:
                   closeSignal === undefined
@@ -21702,6 +21566,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Queue.shutdown(sdkMessages),
@@ -21880,6 +21745,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Queue.shutdown(sdkMessages),
@@ -22058,6 +21924,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Queue.shutdown(sdkMessages),
@@ -22257,6 +22124,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 readMcpResource: () => Effect.die("unexpected MCP resource read"),
                 callMcpTool: () => Effect.die("unexpected MCP tool call"),
                 listPermissionRules: Effect.die("unexpected permission rules read"),
+                contextLimits: Effect.never,
                 stopTask: () => Effect.void,
                 interrupt: Effect.void,
                 close: Effect.sync(() => {
@@ -22404,6 +22272,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   listPermissionRules: Effect.die("unexpected permission rules read"),
+                  contextLimits: Effect.never,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Queue.shutdown(sdkMessages),
@@ -22526,6 +22395,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               readMcpResource: () => Effect.die("unexpected MCP resource read"),
               callMcpTool: () => Effect.die("unexpected MCP tool call"),
               listPermissionRules: Effect.die("unexpected permission rules read"),
+              contextLimits: Effect.never,
               stopTask: () => Effect.void,
               interrupt: Effect.void,
               close: Queue.shutdown(sdkMessages),
