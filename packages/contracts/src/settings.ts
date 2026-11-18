@@ -62,6 +62,8 @@ import {
   SpeechLanguage,
   SpeechModelUnloadTimeout,
   SpeechPostProcessingPromptSettings,
+  VOICE_OFF,
+  VoiceState,
 } from "./speech.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
@@ -1516,6 +1518,7 @@ export const ServerSettings = Schema.Struct({
   defaultAppearanceSetAt: Schema.String.check(Schema.isMaxLength(64)).pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
   ),
+  voice: VoiceState.pipe(Schema.withDecodingDefault(Effect.succeed(VOICE_OFF))),
   environmentIcon: ForwardCompatibleNullable(EnvironmentMachineKind).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1936,6 +1939,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThemeSetAt: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
   defaultAppearance: Schema.optionalKey(DefaultAppearancePreference),
   defaultAppearanceSetAt: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
+  voice: Schema.optionalKey(VoiceState),
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
