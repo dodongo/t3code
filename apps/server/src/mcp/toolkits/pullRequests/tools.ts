@@ -297,7 +297,7 @@ export type ListThreadPullRequestsResult = typeof ListThreadPullRequestsResult.T
 
 const LinkPullRequestTool = Tool.make("link_pull_request", {
   description:
-    "Link a PR to this thread. T3 shows its status and settles the thread on merge. For several PRs, use `link_pull_requests`.",
+    "Link a PR to this thread. T3 shows its status and settles the thread on merge. Call it right after you create, take over, or push to a PR, for every stack layer; host tools such as `gh` don't link. Skip PRs you only read or review. For several PRs, use `link_pull_requests`.",
   parameters: PullRequestTargetInput,
   success: LinkPullRequestResult,
   failure: PullRequestToolError,
@@ -390,7 +390,7 @@ const WatchPullRequestInput = Schema.Struct({
 
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, or conflicts. Handle old comments first. Only later ones wake you. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, or conflicts. Handle old comments first. Only later ones wake you. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself. Use it when asked to monitor a PR, or when requested work such as a merge waits on checks or reviews; push first. Delegated children never watch. Wait on PRs with this, never sleep or poll loops. Unwatch before handback.",
   parameters: WatchPullRequestInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,

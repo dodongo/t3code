@@ -755,7 +755,7 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
-  it.effect("sends T3 instructions to each Cursor conversation that lacks them", () =>
+  it.effect("sends the voice rules to each Cursor conversation that lacks them", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-device-" });
@@ -766,7 +766,7 @@ describe("CursorAdapterV2", () => {
       const instanceId = ProviderInstanceId.make("cursor");
       const threadId = ThreadId.make("cursor-device-thread");
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
-      const setDeviceAccess = (device: boolean) =>
+      const setMcpSession = () =>
         mcpSessions.set({
           environmentId: EnvironmentId.make("cursor-device-environment"),
           threadId,
@@ -775,7 +775,7 @@ describe("CursorAdapterV2", () => {
           endpoint: "http://127.0.0.1:43123/mcp",
           authorizationHeader: "Bearer synthetic-cursor-token",
           browserToolsAvailable: true,
-          capabilities: new Set(device ? ["device"] : []),
+          capabilities: new Set(),
         });
       const modelSelection = { instanceId, model: "composer-2.5" };
       const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
@@ -863,7 +863,7 @@ describe("CursorAdapterV2", () => {
         lastVisitedAt: null,
         deletedAt: null,
       };
-      // Starts at run 5: a conversation from before device instructions existed, now resumed.
+      // Starts at run 5: a conversation told on its first run, now resumed.
       let runOrdinal = 4;
       let lastProviderTurn: OrchestrationV2ProviderTurn | undefined;
       const send = Effect.fnUntraced(function* (compact = false, nativeThreadHasTurns?: boolean) {
@@ -896,28 +896,15 @@ describe("CursorAdapterV2", () => {
         const providerTurn = events.findLast((event) => event.type === "provider_turn.updated");
         if (providerTurn?.type === "provider_turn.updated")
           lastProviderTurn = providerTurn.providerTurn;
-        const sent = sentMessages.at(-1)!;
-        return {
-          orchestration: sent.includes("## T3 Code orchestration"),
-          devices: sent.includes("## T3 Code devices"),
-        };
+        return sentMessages.at(-1)!.includes("### Voice");
       });
-      const told = (orchestration: boolean, devices: boolean) => ({ orchestration, devices });
 
-      yield* setDeviceAccess(true);
-      assert.deepEqual(yield* send(), told(false, true));
-      assert.deepEqual(yield* send(), told(false, false));
+      yield* setMcpSession();
+      assert.isFalse(yield* send());
+      assert.isFalse(yield* send());
       yield* send(true);
-      assert.deepEqual(
-        yield* send(),
-        told(true, true),
-        "compaction drops what the conversation was told",
-      );
-      yield* setDeviceAccess(false);
-      assert.deepEqual(yield* send(), told(false, false));
-      yield* setDeviceAccess(true);
-      assert.deepEqual(yield* send(), told(false, true), "device access turned on later");
-      assert.deepEqual(yield* send(), told(false, false));
+      assert.isTrue(yield* send(), "compaction drops what the conversation was told");
+      assert.isFalse(yield* send());
 
       const keptTurn = lastProviderTurn!;
       yield* send();
@@ -934,9 +921,8 @@ describe("CursorAdapterV2", () => {
       rewindFails = true;
       yield* Effect.flip(rollbackToKept);
       rewindFails = false;
-      assert.deepEqual(
+      assert.isFalse(
         yield* send(false, true),
-        told(false, false),
         "a failed rewind leaves the conversation, and what it was told, unchanged",
       );
       const rewound = yield* rollbackToKept;
@@ -946,9 +932,8 @@ describe("CursorAdapterV2", () => {
         providerThread.nativeThreadRef,
         "Cursor rewinds the same agent",
       );
-      assert.deepEqual(
+      assert.isTrue(
         yield* send(false, true),
-        told(true, true),
         "the rewound conversation may have dropped instructions a later turn carried",
       );
 
@@ -968,9 +953,8 @@ describe("CursorAdapterV2", () => {
         "a rollback to the thread's start has no checkpoint to rewind onto",
       );
       providerThread = rolledBack.providerThread;
-      assert.deepEqual(
+      assert.isTrue(
         yield* send(false, false),
-        told(true, true),
         "the fresh agent after a rollback has been told nothing",
       );
     }).pipe(

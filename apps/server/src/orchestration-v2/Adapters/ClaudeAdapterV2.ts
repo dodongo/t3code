@@ -213,10 +213,7 @@ import {
   type ClaudeScopedLimitNames,
 } from "../../provider/claudeUsageLimits.ts";
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
-import {
-  T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
-  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-} from "@t3tools/provider-core/server/orchestrationInstructions";
+import { T3_CODE_VOICE_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
@@ -2222,32 +2219,6 @@ function parseClaudeInteger(text: string): number {
   return Number.parseInt(value, 10);
 }
 
-// Claude Code defers MCP tools behind ToolSearch, so the agent only finds
-// t3_background_wait when the system prompt says when to reach for it.
-const CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS = `
-
-### Background work you wait on
-
-To wait for a background command or Monitor you started (tests, a build), call \`t3_background_wait\` with its task ID before you end your turn. Do not mark work you leave running, or PRs. T3 MCP tools are deferred: load one with ToolSearch before you call it.
-`;
-
-// Claude 5.1+ returns text written before a tool call as a progress update, which the API
-// returns only as a summary.
-const CLAUDE_SEND_TO_USER_INSTRUCTIONS = `
-### Text the user must read mid-turn
-
-Text you write before a tool call may reach the user only as a one-line summary. When the user must read something in full before your turn ends, such as a draft, a code block, or what a question you're about to ask refers to, send it with \`send_to_user\`. Put everything else in your final reply.
-`;
-
-// Native subagents start from their task, not this session's system prompt.
-const subagentDeviceInstructions: HookCallback = () =>
-  Promise.resolve({
-    hookSpecificOutput: {
-      hookEventName: "SubagentStart",
-      additionalContext: T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
-    },
-  });
-
 export function makeClaudeQueryOptions(input: {
   readonly modelSelection: ModelSelection;
   readonly modelCatalog?: ClaudeModelCatalog;
@@ -2262,8 +2233,6 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
-  /** The thread's T3 MCP session holds the `device` capability. */
-  readonly deviceToolsAvailable?: boolean;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
   readonly disallowedTools?: ReadonlyArray<string>;
@@ -2366,7 +2335,6 @@ export function makeClaudeQueryOptions(input: {
               : { ENABLE_TOOL_SEARCH: input.toolSearchOverride }),
           },
         } as ClaudeSdkSettings);
-  const deviceInstructions = input.mcpServers !== undefined && input.deviceToolsAvailable === true;
   const options: ClaudeAgentSdkQueryOptions = {
     model: compiledSelection.apiModelId,
     // T3 names threads; a supplied title skips Claude's redundant naming request.
@@ -2421,27 +2389,11 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append: [
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-          (input.mcpServers === undefined
-            ? ""
-            : T3_CODE_ORCHESTRATION_INSTRUCTIONS +
-              CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS +
-              CLAUDE_SEND_TO_USER_INSTRUCTIONS +
-              (deviceInstructions
-                ? `\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH}\n`
-                : "")),
+          (input.mcpServers === undefined ? "" : `\n\n${T3_CODE_VOICE_INSTRUCTIONS}\n`),
         ...launchAppendSystemPrompt,
       ].join("\n\n"),
     },
-    ...(deviceInstructions || input.onStop !== undefined
-      ? {
-          hooks: {
-            ...(deviceInstructions
-              ? { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] }
-              : {}),
-            ...(input.onStop === undefined ? {} : { Stop: [{ hooks: [input.onStop] }] }),
-          },
-        }
-      : {}),
+    ...(input.onStop === undefined ? {} : { hooks: { Stop: [{ hooks: [input.onStop] }] } }),
     ...(pluginDirectories.length === 0
       ? {}
       : { plugins: pluginDirectories.map((path) => ({ type: "local" as const, path })) }),
@@ -13053,7 +13005,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(mcpOverrides.mcpServers === undefined
               ? {}
               : { mcpServers: mcpOverrides.mcpServers }),
-            deviceToolsAvailable: mcpSession?.capabilities?.has("device") === true,
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
               ? {}

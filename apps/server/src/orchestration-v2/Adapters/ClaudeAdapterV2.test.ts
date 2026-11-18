@@ -87,7 +87,7 @@ import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { WorkflowAgentTranscriptReadObserver } from "../workflowAgentTranscript.ts";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
-import { T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH } from "@t3tools/provider-core/server/orchestrationInstructions";
+import { T3_CODE_VOICE_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
 import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
@@ -857,9 +857,7 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     };
     assert.equal(systemPrompt.type, "preset");
     assert.equal(systemPrompt.preset, "claude_code");
-    assert.include(systemPrompt.append ?? "", "Use `delegate_task`");
-    assert.include(systemPrompt.append ?? "", "call `t3_background_wait`");
-    assert.notInclude(systemPrompt.append ?? "", "## T3 Code devices");
+    assert.include(systemPrompt.append ?? "", "### Voice");
     const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
     assert.equal(logged.hasMcpServers, true);
     assert.notInclude(JSON.stringify(logged), "secret-claude-token");
@@ -879,70 +877,30 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
   });
 });
 
-describe("ClaudeAdapterV2 device instructions", () => {
-  const options = (input: { readonly mcp: boolean; readonly deviceToolsAvailable: boolean }) =>
-    ClaudeAdapterV2.makeClaudeQueryOptions({
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-opus-5-5",
-      },
-      nativeThreadId: "native-thread-claude-devices",
-      resume: false,
-      cwd: "/workspace",
-      ...(input.mcp
-        ? { mcpServers: { "t3-code": { type: "http" as const, url: "http://127.0.0.1/mcp" } } }
-        : {}),
-      deviceToolsAvailable: input.deviceToolsAvailable,
-      environment: {},
-    });
-  const append = (input: { readonly mcp: boolean; readonly deviceToolsAvailable: boolean }) =>
-    (options(input).systemPrompt as { readonly append?: string }).append ?? "";
-
-  it("gives a session with device access the device block and the ToolSearch line to load it", () => {
-    const text = append({ mcp: true, deviceToolsAvailable: true });
-    assert.include(text, T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH);
-    assert.include(text, "Use `delegate_task`");
-  });
-
-  it("leaves the device block out without device access or without T3 tools", () => {
-    assert.notInclude(append({ mcp: true, deviceToolsAvailable: false }), "## T3 Code devices");
-    assert.notInclude(append({ mcp: false, deviceToolsAvailable: true }), "## T3 Code devices");
-  });
-
-  it("gives native subagents the device block only in a session with device access", async () => {
-    // Subagents start from their task prompt, not the parent's system prompt.
-    const subagentContext = (input: {
-      readonly mcp: boolean;
-      readonly deviceToolsAvailable: boolean;
-    }) =>
-      Promise.all(
-        (options(input).hooks?.SubagentStart ?? []).flatMap((matcher) =>
-          matcher.hooks.map((hook) =>
-            hook(
-              {
-                hook_event_name: "SubagentStart",
-                agent_id: "agent-1",
-                agent_type: "general-purpose",
-                session_id: "native-thread-claude-devices",
-                transcript_path: "/transcript.jsonl",
-                cwd: "/workspace",
-              },
-              undefined,
-              { signal: new AbortController().signal },
-            ),
-          ),
-        ),
-      );
-    assert.deepEqual(await subagentContext({ mcp: true, deviceToolsAvailable: true }), [
-      {
-        hookSpecificOutput: {
-          hookEventName: "SubagentStart",
-          additionalContext: T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
+describe("ClaudeAdapterV2 system prompt", () => {
+  const append = (mcp: boolean) =>
+    (
+      ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
         },
-      },
-    ]);
-    assert.deepEqual(await subagentContext({ mcp: true, deviceToolsAvailable: false }), []);
-    assert.deepEqual(await subagentContext({ mcp: false, deviceToolsAvailable: true }), []);
+        nativeThreadId: "native-thread-claude-system-prompt",
+        resume: false,
+        cwd: "/workspace",
+        ...(mcp
+          ? { mcpServers: { "t3-code": { type: "http" as const, url: "http://127.0.0.1/mcp" } } }
+          : {}),
+        environment: {},
+      }).systemPrompt as { readonly append?: string }
+    ).append ?? "";
+
+  it("adds the voice rules with T3's MCP server and no T3 tool guidance", () => {
+    assert.include(append(true), T3_CODE_VOICE_INSTRUCTIONS);
+    assert.notInclude(append(false), T3_CODE_VOICE_INSTRUCTIONS);
+    for (const tool of ["delegate_task", "t3_background_wait", "send_to_user", "device_open"]) {
+      assert.notInclude(append(true), tool);
+    }
   });
 });
 
