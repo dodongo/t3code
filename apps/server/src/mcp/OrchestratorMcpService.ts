@@ -2797,6 +2797,12 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      if (input.baseCommit !== undefined && input.isolation !== "worktree") {
+        return yield* failure(
+          "invalid_request",
+          'baseCommit sets where a new checkout starts, so it requires isolation "worktree".',
+        );
+      }
       const environmentId =
         input.target === undefined
           ? undefined
@@ -2860,20 +2866,27 @@ const make = Effect.gen(function* () {
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
       if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
         const project = yield* requireProject(parent.thread.projectId);
+        const { baseCommit } = input;
         const base = yield* gitDriver
-          .resolveCommit({
-            cwd: parent.thread.worktreePath ?? project.workspaceRoot,
-            revision: "HEAD",
-          })
+          .resolveCommit(
+            baseCommit === undefined
+              ? { cwd: parent.thread.worktreePath ?? project.workspaceRoot, revision: "HEAD" }
+              : { cwd: project.workspaceRoot, revision: baseCommit },
+          )
           .pipe(
             Effect.mapError(() =>
-              failure("invalid_request", "Unable to resolve the parent checkout commit."),
+              failure(
+                "invalid_request",
+                baseCommit === undefined
+                  ? "Unable to resolve the parent checkout commit."
+                  : `Project "${project.title}" (${project.workspaceRoot}) has no commit "${baseCommit}".`,
+              ),
             ),
           );
         // Launch preparation creates the worktree from the project root, so a
         // parent checkout in another repository (such as a Git folder inside
         // Scratch) would hand it a commit it cannot find.
-        if (parent.thread.worktreePath !== null) {
+        if (baseCommit === undefined && parent.thread.worktreePath !== null) {
           yield* gitDriver
             .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
             .pipe(

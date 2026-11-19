@@ -176,6 +176,12 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
         "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
     }),
   ),
+  baseCommit: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Isolation 'worktree' only: the commit the child's checkout starts from, such as your HEAD in a worktree this thread does not track. Default: the parent checkout's HEAD.",
+    }),
+  ),
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
       description:

@@ -3138,6 +3138,181 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
   );
 
+  describe("a worktree child's base commit", () => {
+    const task = {
+      id: taskId,
+      threadId: parentThreadId,
+      runId: parentRunId,
+      parentNodeId,
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId: codexInstanceId,
+      providerThreadId: null,
+      childThreadId,
+      nativeTaskRef: null,
+      prompt: "Fix the bug.",
+      title: null,
+      model: "gpt-5.4",
+      status: "running",
+      result: null,
+      startedAt: null,
+      completedAt: null,
+    };
+    const delegate = (input: {
+      readonly baseCommit?: string;
+      readonly isolation?: "shared" | "worktree";
+      readonly knownCommits: ReadonlyArray<string>;
+    }) =>
+      Effect.gen(function* () {
+        const resolved: Array<{ cwd: string; revision: string }> = [];
+        const dispatched: Array<{ workspaceStrategy?: unknown }> = [];
+        const parentInWorktree = () => {
+          const parent = parentProjection(dispatched.length > 0 ? [task] : []);
+          return {
+            ...parent,
+            thread: { ...parent.thread, worktreePath: "/repo/thread-worktree" },
+          } as unknown as OrchestrationV2ThreadProjection;
+        };
+        const layerDependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            assertProviderInstanceEnabled: () => Effect.void,
+            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+            getThreadRecords: (threadId) =>
+              Effect.sync(() =>
+                threadId === parentThreadId ? parentInWorktree() : childProjection,
+              ),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command as { workspaceStrategy?: unknown });
+                return {
+                  sequence: 1,
+                  storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
+                } as never;
+              }),
+          }),
+          providerRegistryLayer([
+            providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+          ]),
+          adapterRegistryLayer([codexInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({
+            getById: (id) =>
+              Effect.succeedSome({ id, title: "Repo", workspaceRoot: "/repo" } as Project),
+          }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          ServerSettings.layerTest(),
+        );
+        const git = Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolveCommit: ({ cwd, revision }) => {
+            resolved.push({ cwd, revision });
+            return input.knownCommits.includes(revision)
+              ? Effect.succeed({ commitSha: `sha-of-${revision}` })
+              : Effect.fail(
+                  new GitCommandError({
+                    operation: "GitVcsDriver.test",
+                    command: "git",
+                    cwd,
+                    detail: "unknown revision",
+                  }),
+                );
+          },
+        });
+        const outcome = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((service) =>
+            service.delegateTask(scope, {
+              task: "Fix the bug.",
+              target: { providerInstanceId: codexInstanceId },
+              mode: "async",
+              ...(input.isolation === undefined ? {} : { isolation: input.isolation }),
+              ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
+            }),
+          ),
+          Effect.result,
+          Effect.provide(
+            OrchestratorMcpService.layer.pipe(
+              Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+              Layer.provide(git),
+              Layer.provide(layerDependencies),
+            ),
+          ),
+        );
+        return { outcome, resolved, dispatched };
+      });
+
+    it.effect("starts from a commit the parent names, resolved in the project", () =>
+      Effect.gen(function* () {
+        const { outcome, resolved, dispatched } = yield* delegate({
+          isolation: "worktree",
+          baseCommit: "feature-head",
+          knownCommits: ["feature-head"],
+        });
+        assert.isTrue(Result.isSuccess(outcome));
+        assert.deepEqual(resolved, [{ cwd: "/repo", revision: "feature-head" }]);
+        assert.deepEqual(dispatched[0]?.workspaceStrategy, {
+          type: "worktree",
+          baseRef: "sha-of-feature-head",
+          startFromOrigin: false,
+        });
+      }),
+    );
+
+    it.effect("defaults to the HEAD of the parent's checkout", () =>
+      Effect.gen(function* () {
+        const { resolved, dispatched } = yield* delegate({
+          isolation: "worktree",
+          knownCommits: ["HEAD", "sha-of-HEAD"],
+        });
+        assert.deepEqual(resolved, [
+          { cwd: "/repo/thread-worktree", revision: "HEAD" },
+          { cwd: "/repo", revision: "sha-of-HEAD" },
+        ]);
+        assert.deepEqual(dispatched[0]?.workspaceStrategy, {
+          type: "worktree",
+          baseRef: "sha-of-HEAD",
+          startFromOrigin: false,
+        });
+      }),
+    );
+
+    it.effect("names a commit the project does not have", () =>
+      Effect.gen(function* () {
+        const { outcome, dispatched } = yield* delegate({
+          isolation: "worktree",
+          baseCommit: "missing",
+          knownCommits: [],
+        });
+        assert.isTrue(Result.isFailure(outcome));
+        assert.include(
+          JSON.stringify(outcome),
+          'Project \\"Repo\\" (/repo) has no commit \\"missing\\".',
+        );
+        assert.deepEqual(dispatched, []);
+      }),
+    );
+
+    it.effect("refuses a base commit for a shared checkout", () =>
+      Effect.gen(function* () {
+        const { outcome, resolved } = yield* delegate({
+          isolation: "shared",
+          baseCommit: "feature-head",
+          knownCommits: ["feature-head"],
+        });
+        assert.isTrue(Result.isFailure(outcome));
+        assert.include(JSON.stringify(outcome), 'requires isolation \\"worktree\\"');
+        assert.deepEqual(resolved, []);
+      }),
+    );
+  });
+
   it.effect(
     "retrying an accepted driver-only delegation replays even after the project disables every candidate",
     () =>
