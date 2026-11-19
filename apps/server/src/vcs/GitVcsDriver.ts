@@ -1084,10 +1084,10 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }),
     );
 
-  // Gitlinks (submodules, or checkouts in a folder of repositories) that moved are diffed in their
-  // own repository. A commit off the default branch is diffed from where it left that branch when
-  // that follows the previous commit, so a new or restarted worktree shows only its own commits.
-  // A removal, a move past NESTED_REPOSITORY_DIFF_MAX_FILES or unreadable commits keep the line.
+  // Moved gitlinks (submodules, checkouts in a folder of repositories) are diffed in their own
+  // repository, from where a branch left the default branch when that follows the previous commit.
+  // A linked worktree that only moved along the default branch shows nothing; the main checkout
+  // shows those commits. Removals, big moves and unreadable commits keep the gitlink line.
   const listNestedRepositoryRanges = Effect.fn("GitVcsDriver.listNestedRepositoryRanges")(
     function* (cwd: string, from: string, to: string) {
       const operation = "GitVcsDriver.checkpoints.diffCheckpoints";
@@ -1162,7 +1162,19 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                 args: ["merge-base", "--is-ancestor", gitlink.from, forkPoint],
                 allowNonZeroExit: true,
               })).exitCode === 0;
-            const start = gitlink.from === null || forkPointFollowsFrom ? forkPoint : gitlink.from;
+            const isLinkedWorktree = Effect.map(
+              nestedGit(nestedCwd, ["rev-parse", "--git-dir", "--git-common-dir"]),
+              (dirs) => {
+                const [gitDir = "", commonDir = ""] = dirs.split("\n");
+                return path.resolve(nestedCwd, gitDir) !== path.resolve(nestedCwd, commonDir);
+              },
+            );
+            const start =
+              forkPoint === gitlink.to && (yield* isLinkedWorktree)
+                ? gitlink.to
+                : gitlink.from === null || forkPointFollowsFrom
+                  ? forkPoint
+                  : gitlink.from;
             if (start === null) return null;
             const changed = yield* nestedGit(nestedCwd, [
               "diff",
