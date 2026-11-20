@@ -476,7 +476,7 @@ function providerConstraints(
   return constraints;
 }
 
-/** t3_thread_launch keeps a selection as given, so it can hold options its model does not have. */
+/** A stored selection can hold options its model no longer has. */
 function knownOptions(
   options: ReadonlyArray<ProviderOptionSelection> | undefined,
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,
@@ -519,6 +519,28 @@ function invalidOptionSelections(
   }
   return problems;
 }
+
+/** Rejects options the advertised model does not offer; a model without descriptors accepts any. */
+export const requireAdvertisedOptions = (
+  provider: ServerProvider,
+  model: string,
+  options: ReadonlyArray<ProviderOptionSelection> | undefined,
+) => {
+  if (options === undefined) return Effect.void;
+  const descriptors = advertisedModel(provider, model)?.capabilities?.optionDescriptors;
+  const invalid = invalidOptionSelections(
+    withLegacyUltracodeEffort(descriptors, options),
+    descriptors,
+  );
+  return invalid.length === 0
+    ? Effect.void
+    : Effect.fail(
+        failure(
+          "invalid_request",
+          `Model ${model} on provider ${provider.instanceId} rejected options: ${invalid.join(" ")}`,
+        ),
+      );
+};
 
 function taskStatusForRun(
   run: Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork"> | undefined,
@@ -1745,16 +1767,8 @@ const make = Effect.gen(function* () {
     if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, model);
     const advertised = advertisedModel(provider, model);
     const descriptors = advertised?.capabilities?.optionDescriptors;
+    yield* requireAdvertisedOptions(provider, model, input.target?.options);
     const requestedOptions = withLegacyUltracodeEffort(descriptors, input.target?.options);
-    if (requestedOptions !== undefined) {
-      const invalid = invalidOptionSelections(requestedOptions, descriptors);
-      if (invalid.length > 0) {
-        return yield* failure(
-          "invalid_request",
-          `Model ${model} on provider ${instanceId} rejected options: ${invalid.join(" ")}`,
-        );
-      }
-    }
 
     const inheritsOptions =
       instanceId === inheritedSelection.instanceId &&

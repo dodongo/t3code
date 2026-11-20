@@ -281,7 +281,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         if (!replaying && input.modelSelection !== undefined) {
-          const { instanceId, model } = input.modelSelection;
+          const { instanceId, model, options } = input.modelSelection;
           const registry = yield* ProviderRegistry.ProviderRegistry;
           // The thread runs in this folder, whose own provider config can add models.
           const cwd =
@@ -296,7 +296,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             );
             return provider === undefined
               ? Effect.void
-              : OrchestrationMcp.requireAdvertisedModel(provider, model);
+              : OrchestrationMcp.requireAdvertisedModel(provider, model).pipe(
+                  Effect.andThen(
+                    OrchestrationMcp.requireAdvertisedOptions(provider, model, options),
+                  ),
+                );
           };
           const checked = requireModel(yield* registry.getProviders);
           yield* cwd === undefined

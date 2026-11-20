@@ -441,6 +441,88 @@ it.effect("a launch with a model its provider does not advertise creates no thre
   }),
 );
 
+it.effect("a launch with an option its model does not offer creates no thread", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const instanceId = ProviderInstanceId.make("antigravity");
+    const providers: ServerProvider[] = [
+      {
+        instanceId,
+        driver: ProviderDriverKind.make("antigravity"),
+        enabled: true,
+        installed: true,
+        status: "ready",
+        version: null,
+        auth: { status: "authenticated" },
+        checkedAt: "2026-01-01T00:00:00Z",
+        models: [
+          {
+            slug: "gemini-4-neon",
+            name: "Gemini 4 Neon",
+            isCustom: false,
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "thought_level",
+                  label: "Thinking",
+                  type: "select",
+                  role: "reasoning",
+                  options: [
+                    { id: "low", label: "Low" },
+                    { id: "high", label: "High" },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        slashCommands: [],
+        skills: [],
+      },
+    ];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+      providers,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launchWith = (id: string, value: string) =>
+      toolkit
+        .handle("t3_thread_launch", {
+          title: "Fix",
+          projectId,
+          modelSelection: { instanceId, model: "gemini-4-neon", options: [{ id, value }] },
+        })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.map((result) => result.at(-1)?.result),
+          Effect.provide(dependencies),
+        );
+
+    expect(yield* launchWith("effort", "high")).toMatchObject({
+      code: "invalid_request",
+      message:
+        "Model gemini-4-neon on provider antigravity rejected options: Unknown option effort; supported options: thought_level.",
+    });
+    expect(yield* launchWith("thought_level", "max")).toMatchObject({
+      code: "invalid_request",
+      message:
+        "Model gemini-4-neon on provider antigravity rejected options: Option thought_level must be one of: low, high.",
+    });
+    expect(launched).toHaveLength(0);
+
+    expect(yield* launchWith("thought_level", "high")).toMatchObject({
+      modelSelection: { options: [{ id: "thought_level", value: "high" }] },
+    });
+    expect(launched).toHaveLength(1);
+  }),
+);
+
 it.effect("a launch retried with the same clientRequestId replays the first one", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
