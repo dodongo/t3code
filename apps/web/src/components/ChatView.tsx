@@ -351,6 +351,7 @@ import { resolveThreadSyncPhase } from "../threadSync";
 import { hasAvailableCompactionProvider } from "./chat/compaction.logic";
 import {
   deriveLatestContextWindowSnapshot,
+  deriveSessionCacheHitPercent,
   hasDismissedResumeCompaction,
   latestProviderTurnTokenUsage,
   shouldOfferResumeCompaction,
@@ -1541,6 +1542,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeContextWindow = deriveLatestContextWindowSnapshot(
     serverVisibleTurnItems ?? [],
     activeThreadLiveTokenUsage,
+    activeProviderThread,
+  );
+  const sessionCacheHitPercent = deriveSessionCacheHitPercent(
+    serverProjection?.providerTurns ?? [],
     activeProviderThread,
   );
   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
@@ -3782,6 +3787,7 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                                 resumeCompactionTokens={resumeCompactionTokens}
                                 contextWindow={activeContextWindow}
+                                sessionCacheHitPercent={sessionCacheHitPercent}
                                 usageBudget={usageBudget}
                                 keepFullHistory={keepFullHistory}
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}

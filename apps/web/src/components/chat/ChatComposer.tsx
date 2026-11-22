@@ -401,6 +401,7 @@ export interface ChatComposerProps {
   bannerItems: readonly ComposerBannerStackItem[];
   resumeCompactionTokens: number | null;
   contextWindow: ContextWindowSnapshot | null;
+  sessionCacheHitPercent: number | null;
   usageBudget: UsageBudgetStatus | null;
   keepFullHistory: boolean;
   onToggleKeepFullHistory: () => void;
@@ -2289,7 +2290,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onStopped: (message) => {
       toastManager.add({
         type: "error",
-        title: "Two-way voice stopped listening",
+        title: gt("Two-way voice stopped listening"),
         description: message,
       });
       void changeVoiceMode(appAtomRegistry, routeThreadRef, "oneWay");
@@ -3853,6 +3854,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 {isComposerFooterCompact || dictationTakesFooter ? null : (
                   <ComposerUsageMeters
                     contextWindow={props.contextWindow}
+                    cacheHitPercent={props.sessionCacheHitPercent}
                     budget={props.usageBudget}
                   />
                 )}
