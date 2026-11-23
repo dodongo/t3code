@@ -222,7 +222,7 @@ function PendingSecretRequestForm(props: {
         </Text>
       ) : null}
       <Button
-        label={gt("Save securely")}
+        label={item.delivery === "browser" ? gt("Fill field") : gt("Save securely")}
         tone="primary"
         fullWidth
         disabled={submitting || draft.trim().length === 0}

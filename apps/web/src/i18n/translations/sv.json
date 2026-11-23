@@ -12203,5 +12203,7 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "46b14ee7b6dc0de3": "Skrivs direkt i fältet på den här sidan och sparas aldrig. Agenten ser bara det sidan visar, och lösenord visas som punkter",
+  "8d9e208aef08827f": "Fyll i fältet"
 }

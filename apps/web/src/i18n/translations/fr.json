@@ -12196,5 +12196,7 @@
   "27d76249d09eb69f": "Guide de revue prêt",
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
-  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue"
+  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
+  "46b14ee7b6dc0de3": "Saisi directement dans le champ de cette page, jamais enregistré. L'agent ne voit que ce que la page affiche, et les mots de passe apparaissent sous forme de points",
+  "8d9e208aef08827f": "Remplir le champ"
 }

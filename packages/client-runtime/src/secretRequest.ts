@@ -19,7 +19,10 @@ export type SecretRequestItem = Extract<
   { readonly type: "secret_request" }
 >;
 
-/** A `file` request lets the agent's commands read the value, so its card must not promise more. */
+/**
+ * A `file` request lets the agent's commands read the value, and a `browser` value can show on
+ * the page it fills, so neither card may promise more than that.
+ */
 export const secretRequestPrivacyNote = (
   item: Pick<SecretRequestItem, "delivery">,
   resolve: MFunctionType = mFallback,
@@ -28,7 +31,13 @@ export const secretRequestPrivacyNote = (
     ? resolve(
         msg("Kept out of chat, in a private file this agent's commands can read for 24 hours"),
       )
-    : resolve(msg("Stored securely, never shown to the agent"));
+    : item.delivery === "browser"
+      ? resolve(
+          msg(
+            "Typed straight into this page's field, never stored. The agent sees only what the page shows, and passwords show as dots",
+          ),
+        )
+      : resolve(msg("Stored securely, never shown to the agent"));
 export const SECRET_REQUEST_DEFAULT_PLACEHOLDER = msg("Paste the secret");
 
 // Backticks, <angle brackets> and markdown link targets (balanced parentheses allowed) keep their
