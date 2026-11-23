@@ -29,7 +29,9 @@ export const secretRequestPrivacyNote = (
 ) =>
   item.delivery === "file"
     ? resolve(
-        msg("Kept out of chat, in a private file this agent's commands can read for 24 hours"),
+        msg(
+          "Kept out of chat and never stored. The next command this agent runs that reads it gets it once",
+        ),
       )
     : item.delivery === "browser"
       ? resolve(

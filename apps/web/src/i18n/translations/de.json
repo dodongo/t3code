@@ -12198,5 +12198,6 @@
   "b7df38b7d8792d78": "Leitfaden öffnen",
   "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
   "46b14ee7b6dc0de3": "Wird direkt in das Feld dieser Seite eingegeben und nie gespeichert. Der Agent sieht nur, was die Seite anzeigt, und Passwörter erscheinen als Punkte",
-  "8d9e208aef08827f": "Feld ausfüllen"
+  "8d9e208aef08827f": "Feld ausfüllen",
+  "f571cb7d488302a6": "Bleibt aus dem Chat heraus und wird nie gespeichert. Der nächste Befehl dieses Agenten, der ihn liest, erhält ihn einmalig"
 }

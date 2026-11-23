@@ -5335,5 +5335,6 @@
   "856812e7e1fc445e": "Tool-Aufrufe im Chat",
   "8d545d54c0a9e950": "Die Befehle, Bearbeitungen und Suchen ausblenden, die Agenten ausführen. „Erfolgreiche ausblenden“ behält Fehler. „Zen“ zeigt nur endgültige Antworten. Genehmigungen, Fragen und Fehler werden immer angezeigt.",
   "46b14ee7b6dc0de3": "Wird direkt in das Feld dieser Seite eingegeben und nie gespeichert. Der Agent sieht nur, was die Seite anzeigt, und Passwörter erscheinen als Punkte",
-  "506705376c24c857": "Feld ausfüllen"
+  "506705376c24c857": "Feld ausfüllen",
+  "f571cb7d488302a6": "Bleibt aus dem Chat heraus und wird nie gespeichert. Der nächste Befehl dieses Agenten, der ihn liest, erhält ihn einmalig"
 }

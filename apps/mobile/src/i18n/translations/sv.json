@@ -5335,5 +5335,6 @@
   "856812e7e1fc445e": "Verktygsanrop i chatten",
   "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid.",
   "46b14ee7b6dc0de3": "Skrivs direkt i fältet på den här sidan och sparas aldrig. Agenten ser bara det sidan visar, och lösenord visas som punkter",
-  "506705376c24c857": "Fyll i fältet"
+  "506705376c24c857": "Fyll i fältet",
+  "f571cb7d488302a6": "Hålls utanför chatten och sparas aldrig. Nästa kommando som den här agenten kör och som läser det får det en gång"
 }

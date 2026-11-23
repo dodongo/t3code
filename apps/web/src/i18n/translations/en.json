@@ -12207,5 +12207,6 @@
   "b7df38b7d8792d78": "Open guide",
   "9e91e9a77b664e4e": "Could not start a review guide",
   "46b14ee7b6dc0de3": "Typed straight into this page's field, never stored. The agent sees only what the page shows, and passwords show as dots",
-  "8d9e208aef08827f": "Fill field"
+  "8d9e208aef08827f": "Fill field",
+  "f571cb7d488302a6": "Kept out of chat and never stored. The next command this agent runs that reads it gets it once"
 }
