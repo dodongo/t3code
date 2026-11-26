@@ -3143,10 +3143,14 @@ const make = Effect.gen(function* () {
       ) {
         return yield* failure("invalid_request", `Unknown delegation profile ${input.profile}.`);
       }
-      const mainProfiles =
-        parent?.thread.delegationProfile === undefined
-          ? settings.delegation.mainProfiles
+      const callerProfileName = parent?.thread.delegationProfile;
+      const callerProfile =
+        callerProfileName !== undefined
+          ? settings.delegation.profiles[callerProfileName]
           : undefined;
+      const mainProfiles =
+        callerProfileName === undefined ? settings.delegation.mainProfiles : undefined;
+      const allowedProfiles = callerProfile?.allowedProfiles;
       const cwd = parent === undefined ? undefined : yield* parentWorkspaceCwd(parent);
       const machineProviders = yield* loadProviders;
       const unscanned =
@@ -3176,7 +3180,8 @@ const make = Effect.gen(function* () {
                 .filter(
                   ([name]) =>
                     (input.profile === undefined || name === input.profile) &&
-                    (mainProfiles === undefined || mainProfiles.includes(name)),
+                    (mainProfiles === undefined || mainProfiles.includes(name)) &&
+                    (allowedProfiles === undefined || allowedProfiles.includes(name)),
                 )
                 .toSorted(([left], [right]) => left.localeCompare(right)),
               ([name, profile]) =>
@@ -3325,13 +3330,23 @@ const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
       );
+      const callerThread = (yield* loadCallerRecords(scope.thread.threadId, [])).thread;
+      const callerProfileName = callerThread.delegationProfile;
+      const callerProfile =
+        callerProfileName !== undefined
+          ? settings.delegation.profiles[callerProfileName]
+          : undefined;
       const mainProfiles =
-        settings.delegation.mainProfiles !== undefined &&
-        (yield* loadCallerRecords(scope.thread.threadId, [])).thread.delegationProfile === undefined
+        settings.delegation.mainProfiles !== undefined && callerProfileName === undefined
           ? settings.delegation.mainProfiles
           : undefined;
+      const allowedProfiles = callerProfile?.allowedProfiles;
+
       const profileName =
-        mainProfiles === undefined ? input.profile : (input.profile ?? mainProfiles[0]);
+        mainProfiles === undefined && allowedProfiles === undefined
+          ? input.profile
+          : (input.profile ?? mainProfiles?.[0] ?? allowedProfiles?.[0]);
+
       if (
         mainProfiles !== undefined &&
         (profileName === undefined || !mainProfiles.includes(profileName))
@@ -3339,6 +3354,15 @@ const make = Effect.gen(function* () {
         return yield* failure(
           "invalid_request",
           `A main thread delegates only with the profiles ${mainProfiles.join(", ")}; omit profile to use ${mainProfiles[0]}.`,
+        );
+      }
+      if (
+        allowedProfiles !== undefined &&
+        (profileName === undefined || !allowedProfiles.includes(profileName))
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
         );
       }
       if (
