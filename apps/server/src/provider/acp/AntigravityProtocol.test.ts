@@ -795,7 +795,7 @@ describe("Antigravity served reads", () => {
     });
   });
 
-  it("drops agy's toolSummary from T3 MCP call arguments only", () => {
+  it("drops agy's toolSummary from T3 and codemode MCP call arguments only", () => {
     const t3Call = normalizeAntigravityToolCall(
       parseToolUpdate(
         normalizeAntigravitySessionUpdate({
@@ -813,18 +813,39 @@ describe("Antigravity served reads", () => {
     );
     expect(t3Call.data.rawInput).toEqual({ message: "Hello" });
 
+    for (const title of ["Run mcp_codemode_codemode", "Run mcp_codemode_codemode_background"]) {
+      const codemodeCall = normalizeAntigravityToolCall(
+        parseToolUpdate(
+          normalizeAntigravitySessionUpdate({
+            sessionId: "session-1",
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: `call_${title}`,
+              title,
+              kind: "other",
+              status: "in_progress",
+              rawInput: { code: "return 1;", toolSummary: "Evaluate expression" },
+            },
+          }),
+        ).toolCall,
+      );
+      expect(codemodeCall.data.rawInput).toEqual({ code: "return 1;" });
+    }
+
     const foreignCall = normalizeAntigravityToolCall(
-      parseToolUpdate({
-        sessionId: "session-1",
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: "call_other",
-          title: "Run mcp_other_send_to_user",
-          kind: "other",
-          status: "in_progress",
-          rawInput: { message: "Hello", toolSummary: "Send greeting" },
-        },
-      }).toolCall,
+      parseToolUpdate(
+        normalizeAntigravitySessionUpdate({
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call_other",
+            title: "Run mcp_other_send_to_user",
+            kind: "other",
+            status: "in_progress",
+            rawInput: { message: "Hello", toolSummary: "Send greeting" },
+          },
+        }),
+      ).toolCall,
     );
     expect(foreignCall.data.rawInput).toEqual({ message: "Hello", toolSummary: "Send greeting" });
   });

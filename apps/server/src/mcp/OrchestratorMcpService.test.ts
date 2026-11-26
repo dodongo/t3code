@@ -3789,6 +3789,38 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.lengthOf((yield* service.capabilities(caller, {})).profiles ?? [], 4);
         yield* start({});
         assert.equal(dispatched.at(-1)?.delegationProfile, "worker");
+
+        yield* settings.updateSettings({
+          delegation: {
+            ...delegation,
+            profiles: {
+              ...delegation.profiles,
+              restricted: { ...delegation.profiles.restricted!, allowedProfiles: ["worker"] },
+              worker: { ...delegation.profiles.worker!, allowedProfiles: [] },
+            },
+          },
+        });
+        assert.deepEqual(
+          (yield* service.capabilities(caller, {})).profiles?.map(({ name }) => name),
+          ["worker"],
+        );
+        yield* service.delegateTask(caller, { task: "Implement slice." });
+        assert.equal(dispatched.at(-1)?.delegationProfile, "worker");
+        const disallowedChild = yield* start({ profile: "reviewer" }).pipe(Effect.flip);
+        assert.equal(disallowedChild.code, "invalid_request");
+        assert.include(
+          disallowedChild.message,
+          "restricted delegates only with the profiles worker",
+        );
+
+        callerProfile = "worker";
+        assert.deepEqual((yield* service.capabilities(caller, {})).profiles, []);
+        const cannotDelegate = yield* service
+          .delegateTask(caller, { task: "Subtask." })
+          .pipe(Effect.flip);
+        assert.equal(cannotDelegate.code, "invalid_request");
+        assert.include(cannotDelegate.message, "worker may not delegate tasks");
+
         callerProfile = undefined;
         yield* settings.updateSettings({ delegation });
 
@@ -3873,7 +3905,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             constraints: [invalidReviewer.message],
           });
         }
-        assert.lengthOf(dispatched, 9);
+        assert.lengthOf(dispatched, 10);
       }).pipe(Effect.provide(serviceLayer));
     }),
   );

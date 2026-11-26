@@ -3362,7 +3362,9 @@ const make = Effect.gen(function* () {
       ) {
         return yield* failure(
           "invalid_request",
-          `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
+          allowedProfiles.length === 0
+            ? `A thread with profile ${callerProfileName} may not delegate tasks.`
+            : `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
         );
       }
       if (

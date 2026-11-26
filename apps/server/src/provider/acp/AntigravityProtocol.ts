@@ -397,8 +397,9 @@ function stripAntigravityToolSummary(value: unknown): unknown {
 
 /**
  * agy adds its own `toolSummary` to MCP call arguments. T3 records its MCP results under the
- * arguments it received, so the summary is dropped before the shared adapter matches them.
- * Untitled updates cannot be identified and are stripped too; titled non-T3 calls keep it.
+ * arguments it received, and `codemode` clients render extra input fields verbatim, so the summary
+ * is dropped for both. Untitled updates cannot be identified and are stripped too; other titled
+ * foreign MCP calls keep it.
  */
 function withoutT3McpToolSummary(
   update: Extract<
