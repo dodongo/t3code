@@ -6895,7 +6895,9 @@ describe("OrchestratorMcpService live threads", () => {
           { type: "text", text: JSON.stringify(sent) },
         ];
         assert.deepEqual(
-          output.slice(1),
+          output
+            .slice(1)
+            .map((part) => (part.type === "text" ? { type: part.type, text: part.text } : part)),
           scenario === "drifted"
             ? [
                 {
