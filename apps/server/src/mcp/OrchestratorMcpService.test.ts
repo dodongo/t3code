@@ -6407,6 +6407,8 @@ describe("OrchestratorMcpService live threads", () => {
     const parentCwd = yield* fs.makeTempDirectoryScoped({ prefix: "mcp-delegation-parent-" });
     const pi = ProviderInstanceId.make("pi");
     const otherPi = ProviderInstanceId.make("pi_other");
+    const beforeProviderRead = yield* Ref.make(Effect.void);
+    const afterSettingsRead = yield* Ref.make(Effect.void);
     const piDriver = ProviderDriverKind.make("pi");
     const projectId = ProjectId.make("project:mcp-cwd");
     const adapters = ProviderAdapterRegistry.layerFromAdapters([
@@ -6431,7 +6433,7 @@ describe("OrchestratorMcpService live threads", () => {
       model: "openai:gpt-6-sol",
       options: { thinking: "xhigh" },
     } as const;
-    const settings = ServerSettings.layerTest({
+    const savedSettings = ServerSettings.layerTest({
       providerInstances: {
         [pi]: { driver: "pi", enabled: true },
         [otherPi]: { driver: "pi", enabled: true },
@@ -6447,6 +6449,17 @@ describe("OrchestratorMcpService live threads", () => {
         },
       },
     });
+    const settings = Layer.effect(
+      ServerSettings.ServerSettingsService,
+      ServerSettings.ServerSettingsService.pipe(
+        Effect.map((service) => ({
+          ...service,
+          getSettings: service.getSettings.pipe(
+            Effect.tap(() => Ref.getAndSet(afterSettingsRead, Effect.void).pipe(Effect.flatten)),
+          ),
+        })),
+      ),
+    ).pipe(Layer.provide(savedSettings));
     const gitLayer = GitVcsDriver.layer.pipe(
       Layer.provide(ServerConfig.layerTest(parentCwd, { prefix: "mcp-delegation-git-" })),
       Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
@@ -6474,7 +6487,7 @@ describe("OrchestratorMcpService live threads", () => {
                 { instanceId, driver },
                 { instanceId: pi, driver: piDriver },
                 { instanceId: otherPi, driver: piDriver },
-              ].map((provider) => ({
+              ].map((provider): ServerProvider => ({
                 ...provider,
                 enabled: true,
                 installed: true,
@@ -6504,6 +6517,8 @@ describe("OrchestratorMcpService live threads", () => {
                 slashCommands: [],
                 skills: [],
               })),
+            ).pipe(
+              Effect.tap(() => Ref.getAndSet(beforeProviderRead, Effect.void).pipe(Effect.flatten)),
             ),
           }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
@@ -6582,6 +6597,8 @@ describe("OrchestratorMcpService live threads", () => {
         serverSettings,
         advisor,
         otherPi,
+        beforeProviderRead,
+        afterSettingsRead,
       };
     }).pipe(Effect.provide(context));
   }).pipe(Effect.provide(NodeServices.layer));
@@ -6847,6 +6864,160 @@ describe("OrchestratorMcpService live threads", () => {
       assert.deepEqual(after.thread, before.thread);
       assert.deepEqual(after.runs, before.runs);
     }),
+  );
+
+  it.effect(
+    "delegateTask: does not configure a persistent child when archive wins the child lock",
+    () =>
+      Effect.gen(function* () {
+        const { advisor, executor, orchestration, scope, serverSettings, service } =
+          yield* delegationFixture;
+        const request = { task: "Review the changes.", profile: "advisor" };
+        const { childThreadId } = yield* service.delegateTask(scope, request);
+        if (childThreadId === null) return yield* Effect.die("Expected a persistent child.");
+        const before = yield* orchestration.getThreadProjection(childThreadId);
+        const { delegation } = yield* serverSettings.getSettings;
+        yield* serverSettings.updateSettings({
+          delegation: {
+            ...delegation,
+            profiles: {
+              ...delegation.profiles,
+              advisor: { ...advisor, model: "openai:gpt-6-astra" },
+            },
+          },
+        });
+        const releaseChild = yield* Deferred.make<void>();
+        const holder = yield* executor
+          .withLock(childThreadId, Deferred.await(releaseChild))
+          .pipe(
+            Effect.provideService(References.PreventSchedulerYield, true),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        const archive = yield* orchestration
+          .dispatch({
+            type: "thread.archive",
+            threadId: childThreadId,
+            commandId: CommandId.make("archive-before-selection-commit"),
+          })
+          .pipe(
+            Effect.provideService(References.PreventSchedulerYield, true),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        const resolved = yield* Deferred.make<void>();
+        const tracer = Tracer.make({
+          span(options) {
+            if (options.name === "OrchestratorV2.refreshPersistentChildSelection") {
+              Deferred.doneUnsafe(resolved, Effect.void);
+            }
+            return new Tracer.NativeSpan(options);
+          },
+        });
+        const refresh = yield* service
+          .delegateTask(scope, request)
+          .pipe(Effect.withTracer(tracer), Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(resolved);
+        yield* Deferred.succeed(releaseChild, undefined);
+        yield* Fiber.join(holder);
+        yield* Fiber.join(archive);
+        const replacement = yield* Fiber.join(refresh);
+        assert.isNotNull(replacement.childThreadId);
+        assert.notEqual(replacement.childThreadId, childThreadId);
+        const archived = yield* orchestration.getThreadProjection(childThreadId);
+        assert.isNotNull(archived.thread.archivedAt);
+        assert.deepEqual(archived.thread.modelSelection, before.thread.modelSelection);
+      }),
+  );
+
+  it.effect("delegateTask: an older persistent request cannot overwrite a newer selection", () =>
+    Effect.gen(function* () {
+      const { advisor, afterSettingsRead, orchestration, scope, serverSettings, service } =
+        yield* delegationFixture;
+      const request = { task: "Review the changes.", profile: "advisor" };
+      const { childThreadId } = yield* service.delegateTask(scope, request);
+      if (childThreadId === null) return yield* Effect.die("Expected a persistent child.");
+      const { delegation } = yield* serverSettings.getSettings;
+      yield* serverSettings.updateSettings({
+        delegation: {
+          ...delegation,
+          profiles: {
+            ...delegation.profiles,
+            advisor: { ...advisor, options: { thinking: "medium" } },
+          },
+        },
+      });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Ref.set(
+        afterSettingsRead,
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const older = yield* service
+        .delegateTask(scope, request)
+        .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(entered);
+      yield* serverSettings.updateSettings({
+        delegation: {
+          ...delegation,
+          profiles: {
+            ...delegation.profiles,
+            advisor: { ...advisor, model: "openai:gpt-6-astra", options: { thinking: "medium" } },
+          },
+        },
+      });
+      const newer = yield* service.delegateTask(scope, request).pipe(Effect.flip);
+      assert.include(newer.message, "t3_thread_send");
+      const updated = yield* orchestration.getThreadProjection(childThreadId);
+      assert.equal(updated.thread.modelSelection.model, "gpt-6-astra");
+      yield* Deferred.succeed(release, undefined);
+      const stale = yield* Fiber.join(older);
+      assert.equal(stale.message, newer.message);
+      const child = yield* orchestration.getThreadProjection(childThreadId);
+      assert.deepEqual(child.thread.modelSelection, updated.thread.modelSelection);
+    }),
+  );
+
+  it.effect(
+    "delegateTask: does not configure a persistent child after Stop wins during resolution",
+    () =>
+      Effect.gen(function* () {
+        const { advisor, beforeProviderRead, orchestration, scope, serverSettings, service } =
+          yield* delegationFixture;
+        const request = { task: "Review the changes.", profile: "advisor" };
+        const { childThreadId } = yield* service.delegateTask(scope, request);
+        if (childThreadId === null) return yield* Effect.die("Expected a persistent child.");
+        const before = yield* orchestration.getThreadProjection(childThreadId);
+        const { delegation } = yield* serverSettings.getSettings;
+        yield* serverSettings.updateSettings({
+          delegation: {
+            ...delegation,
+            profiles: {
+              ...delegation.profiles,
+              advisor: { ...advisor, model: "openai:gpt-6-astra" },
+            },
+          },
+        });
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        yield* Ref.set(
+          beforeProviderRead,
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        const refresh = yield* service
+          .delegateTask(scope, request)
+          .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(entered);
+        yield* orchestration.dispatch({
+          type: "thread.stop",
+          threadId: scope.thread.threadId,
+          commandId: CommandId.make("stop-before-selection-commit"),
+        });
+        yield* Deferred.succeed(release, undefined);
+        const stopped = yield* Fiber.join(refresh);
+        assert.equal(stopped.code, "parent_not_active");
+        assert.notInclude(stopped.message, "t3_thread_send");
+        const child = yield* orchestration.getThreadProjection(childThreadId);
+        assert.deepEqual(child.thread.modelSelection, before.thread.modelSelection);
+      }),
   );
 
   it.effect("delegateTask: cancels a persistent waiter before the first dispatch unlocks", () =>
