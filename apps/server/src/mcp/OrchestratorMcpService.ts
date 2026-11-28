@@ -50,7 +50,7 @@ import {
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type OrchestratorMcpThreadRun,
-  type OrchestratorMcpThreadSendInput,
+  OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendResult,
   type OrchestratorMcpThreadTimelineItem,
   type OrchestratorMcpThreadWaitInput,
@@ -71,6 +71,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -295,6 +296,10 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 export const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
+
+const encodeThreadSendInput = Schema.encodeEffect(
+  Schema.fromJsonString(OrchestratorMcpThreadSendInput),
+);
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -1398,6 +1403,7 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
+  const persistentDelegationLock = yield* KeyedLock.make<ThreadId>();
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -3367,13 +3373,14 @@ const make = Effect.gen(function* () {
             : `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
         );
       }
-      if (
-        input.clientRequestId !== undefined &&
-        (profileName !== undefined || environmentId === undefined)
-      ) {
-        const receipt = yield* threadManagement
-          .replayDelegatedTask({ commandId, parentThreadId: scope.thread.threadId })
-          .pipe(Effect.mapError(threadManagementFailure));
+      const replay =
+        input.clientRequestId === undefined
+          ? Effect.succeedNone
+          : threadManagement
+              .replayDelegatedTask({ commandId, parentThreadId: scope.thread.threadId })
+              .pipe(Effect.mapError(threadManagementFailure));
+      if (profileName !== undefined || environmentId === undefined) {
+        const receipt = yield* replay;
         if (Option.isSome(receipt))
           return yield* finishDelegation(scope, input, key, commandId, receipt.value);
       }
@@ -3456,6 +3463,46 @@ const make = Effect.gen(function* () {
           "parent_not_active",
           "Delegated tasks require an active run owned by this MCP provider session.",
         );
+      }
+      const childProfileName = profileName ?? callerProfileName;
+      const checkPersistentDelegation =
+        childProfileName !== undefined && (profiled?.profile ?? callerProfile)?.persistent === true
+          ? Effect.gen(function* () {
+              const childIds = yield* threadManagement
+                .listAppOwnedChildThreadIds(scope.thread.threadId)
+                .pipe(Effect.mapError(threadManagementFailure));
+              for (const childThreadId of childIds) {
+                const shell = yield* threadManagement
+                  .getThreadShell(childThreadId)
+                  .pipe(Effect.mapError(threadManagementFailure));
+                if (shell?.archivedAt !== null || shell.deletedAt !== null) continue;
+                const { thread } = yield* loadThreadRecords(childThreadId, []);
+                if (
+                  thread.delegationProfile !== childProfileName ||
+                  thread.archivedAt !== null ||
+                  thread.deletedAt !== null
+                )
+                  continue;
+
+                const receipt = yield* replay;
+                if (Option.isSome(receipt)) return receipt;
+                const followUp = yield* encodeThreadSendInput({
+                  threadId: childThreadId,
+                  message: "<follow-up task>",
+                  mode: "queue",
+                }).pipe(Effect.orDie);
+                return yield* failure(
+                  "invalid_request",
+                  `Profile ${childProfileName} already has a child thread. Reuse it with t3_thread_send(${followUp}).`,
+                );
+              }
+              return Option.none();
+            })
+          : undefined;
+      if (checkPersistentDelegation !== undefined) {
+        const receipt = yield* checkPersistentDelegation;
+        if (Option.isSome(receipt))
+          return yield* finishDelegation(scope, input, key, commandId, receipt.value);
       }
       const providers = yield* loadProviders;
       const cwd = requestedCwd ?? (yield* parentWorkspaceCwd(parent));
@@ -3603,7 +3650,7 @@ const make = Effect.gen(function* () {
           // ThreadManagementService.dispatch is the chokepoint for this command
           // type's own enablement check, using the same command id and its
           // receipt-replay exemption, so no separate assert runs here.
-          const result = yield* threadManagement
+          const dispatch = threadManagement
             .dispatch({
               type: "delegated_task.request",
               createdBy: "agent",
@@ -3640,6 +3687,15 @@ const make = Effect.gen(function* () {
                     ),
               ),
             );
+          const result = yield* checkPersistentDelegation === undefined
+            ? dispatch
+            : persistentDelegationLock.withLock(
+                scope.thread.threadId,
+                Effect.gen(function* () {
+                  const receipt = yield* restore(checkPersistentDelegation);
+                  return Option.isSome(receipt) ? receipt.value : yield* dispatch;
+                }),
+              );
           return yield* finishDelegation(scope, input, key, commandId, result, restore);
         }),
       );

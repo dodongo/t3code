@@ -5,6 +5,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  EventId,
   GitCommandError,
   isLiveSubagentShell,
   MessageId,
@@ -54,6 +55,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
@@ -6412,6 +6414,11 @@ describe("OrchestratorMcpService live threads", () => {
       adapters,
       { databaseLayer: database, runEffectWorker: false },
     );
+    const sharedProfile = {
+      checkout: "shared",
+      model: "openai:gpt-5.4",
+      deniedSkills: [],
+    } as const;
     const settings = ServerSettings.layerTest({
       providerInstances: {
         [pi]: { driver: "pi", enabled: true },
@@ -6419,8 +6426,11 @@ describe("OrchestratorMcpService live threads", () => {
       delegation: {
         providerByVendor: { openai: pi },
         profiles: {
-          shared: { checkout: "shared", model: "openai:gpt-5.4", deniedSkills: [] },
-          worktree: { checkout: "worktree", model: "openai:gpt-5.4", deniedSkills: [] },
+          shared: sharedProfile,
+          worktree: { ...sharedProfile, checkout: "worktree" },
+          advisor: { ...sharedProfile, persistent: true },
+          reviewer: { ...sharedProfile, persistent: true },
+          transient: { ...sharedProfile, persistent: false },
         },
       },
     });
@@ -6486,42 +6496,63 @@ describe("OrchestratorMcpService live threads", () => {
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       const git = yield* GitVcsDriver.GitVcsDriver;
       const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      yield* orchestration.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("create"),
-        threadId,
-        projectId,
-        title: "Parent",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: "parent-branch",
-        worktreePath: parentCwd,
-        createdBy: "user",
-        creationSource: "web",
-      });
-      yield* orchestration.dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make("start"),
-        threadId,
-        messageId: MessageId.make("parent-message"),
-        text: "Delegate work.",
-        attachments: [],
-        dispatchMode: { type: "start_immediately" },
-        createdBy: "user",
-        creationSource: "web",
-      });
-      yield* worker.drain();
-      const { providerThreads } = yield* orchestration.getThreadProjection(threadId);
-      const providerSessionId = providerThreads[0]?.providerSessionId;
-      assert.isString(providerSessionId);
-      const scope = {
-        ...client,
-        requestNamespace: "provider-session:mcp-delegation",
-        client: undefined,
-        thread: { threadId, providerSessionId: providerSessionId!, providerInstanceId: instanceId },
-      } satisfies McpInvocationScope;
-      return { git, fs, path, parentCwd, orchestration, worker, service, scope, sessions };
+      const sink = yield* EventSink.EventSinkV2;
+      const startParent = (parentThreadId: ThreadId) =>
+        Effect.gen(function* () {
+          yield* orchestration.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${parentThreadId}:create`),
+            threadId: parentThreadId,
+            projectId,
+            title: "Parent",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "parent-branch",
+            worktreePath: parentCwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* orchestration.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${parentThreadId}:start`),
+            threadId: parentThreadId,
+            messageId: MessageId.make(`${parentThreadId}:message`),
+            text: "Delegate work.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          const { providerThreads } = yield* orchestration.getThreadProjection(parentThreadId);
+          const providerSessionId = providerThreads[0]?.providerSessionId;
+          assert.isString(providerSessionId);
+          return {
+            ...client,
+            requestNamespace: `provider-session:${parentThreadId}`,
+            client: undefined,
+            thread: {
+              threadId: parentThreadId,
+              providerSessionId: providerSessionId!,
+              providerInstanceId: instanceId,
+            },
+          } satisfies McpInvocationScope;
+        });
+      const scope = yield* startParent(threadId);
+      return {
+        git,
+        fs,
+        path,
+        parentCwd,
+        orchestration,
+        worker,
+        service,
+        scope,
+        sessions,
+        sink,
+        startParent,
+      };
     }).pipe(Effect.provide(context));
   }).pipe(Effect.provide(NodeServices.layer));
 
@@ -6593,6 +6624,105 @@ describe("OrchestratorMcpService live threads", () => {
         });
         yield* checkChild(defaulted.childThreadId, parentCwd, "parent-branch");
       }),
+  );
+
+  it.effect("delegateTask: keeps one nonarchived persistent child per parent and profile", () =>
+    Effect.gen(function* () {
+      const { orchestration, service, scope, sink, startParent } = yield* delegationFixture;
+      const task = "Review the changes.";
+      const request = { task, profile: "advisor" };
+      const start = (clientRequestId?: string) =>
+        service.delegateTask(scope, { ...request, clientRequestId });
+      const [accepted, replayed] = yield* Effect.all([start("first"), start("first")], {
+        concurrency: 2,
+      });
+      const { taskId, childThreadId, childRunId } = accepted;
+      if (childThreadId === null) return yield* Effect.die("No persistent child was created.");
+      assert.equal(replayed.taskId, taskId);
+      const reuse = (threadId: ThreadId | null) =>
+        `t3_thread_send(${JSON.stringify({ threadId, message: "<follow-up task>", mode: "queue" })})`;
+      const parentThreadId = scope.thread.threadId;
+      const parent = yield* orchestration.getThreadProjection(parentThreadId);
+      assert.deepEqual(
+        parent.subagents.map(({ id }) => id),
+        [taskId],
+      );
+      const child = yield* orchestration.getThreadProjection(childThreadId);
+      const run = child.runs.find(({ id }) => id === childRunId)!;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("persistent-child-completed"),
+            type: "run.updated",
+            threadId: childThreadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "completed", completedAt: now },
+          },
+          {
+            id: EventId.make("persistent-task-completed"),
+            type: "subagent.updated",
+            threadId: parentThreadId,
+            nodeId: taskId,
+            occurredAt: now,
+            payload: {
+              ...parent.subagents[0]!,
+              status: "completed",
+              result: "Reviewed.",
+              completedAt: now,
+            },
+          },
+        ],
+      });
+      const duplicate = yield* start().pipe(Effect.flip);
+      assert.equal(duplicate.code, "invalid_request");
+      assert.include(duplicate.message, reuse(childThreadId));
+      const retry = yield* start("first");
+      assert.equal(retry.taskId, taskId);
+      assert.equal(retry.status, "completed");
+
+      const reviewer = yield* service.delegateTask(scope, { task, profile: "reviewer" });
+      assert.isNotNull(reviewer.childThreadId);
+      assert.notEqual(reviewer.childThreadId, childThreadId);
+      const otherParent = yield* startParent(ThreadId.make("thread:mcp-persistent-other-parent"));
+      const otherAdvisor = yield* service.delegateTask(otherParent, request);
+      assert.isNotNull(otherAdvisor.childThreadId);
+      assert.notEqual(otherAdvisor.childThreadId, childThreadId);
+
+      yield* orchestration.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("persistent-child-archive"),
+        threadId: childThreadId,
+      });
+      const attempts = yield* Effect.all(
+        [start("replacement-1").pipe(Effect.result), start("replacement-2").pipe(Effect.result)],
+        { concurrency: 2 },
+      );
+      const [replacement] = attempts.filter(Result.isSuccess);
+      const [conflict] = attempts.filter(Result.isFailure);
+      if (replacement === undefined || conflict === undefined) {
+        return yield* Effect.die("Expected one replacement and one conflict.");
+      }
+      assert.isNotNull(replacement.success.childThreadId);
+      assert.notEqual(replacement.success.childThreadId, childThreadId);
+      assert.equal(conflict.failure.code, "invalid_request");
+      assert.include(conflict.failure.message, reuse(replacement.success.childThreadId));
+    }),
+  );
+
+  it.effect("delegateTask: allows repeated children when persistence is off or omitted", () =>
+    Effect.gen(function* () {
+      const { service, scope } = yield* delegationFixture;
+      for (const profile of ["shared", "transient"]) {
+        const request = { task: "Review the changes.", profile };
+        const first = yield* service.delegateTask(scope, request);
+        const second = yield* service.delegateTask(scope, request);
+        assert.isNotNull(first.childThreadId);
+        assert.isNotNull(second.childThreadId);
+        assert.notEqual(second.childThreadId, first.childThreadId);
+      }
+    }),
   );
 
   it.effect("delegateTask: cwd rejects invalid folders and incompatible options", () =>

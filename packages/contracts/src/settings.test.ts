@@ -46,10 +46,14 @@ const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 describe("delegation profiles", () => {
   const profile = { model: "openai:review-model", deniedSkills: [], checkout: "shared" };
 
-  it("round-trips a profile's optional provider instance in settings and patches", () => {
+  it("round-trips optional profile fields in settings and patches", () => {
     const delegation = {
       providerByVendor: { openai: "pi" },
-      profiles: { worker: profile, reviewer: { ...profile, providerInstanceId: "pi-reviewer" } },
+      profiles: {
+        worker: profile,
+        reviewer: { ...profile, providerInstanceId: "pi-reviewer", persistent: true },
+        transient: { ...profile, persistent: false },
+      },
     };
     expect(encodeServerSettings(decodeServerSettings({ delegation })).delegation).toEqual(
       delegation,
@@ -68,6 +72,16 @@ describe("delegation profiles", () => {
     expect(decodeServerSettings({ delegation }).delegation).toEqual(delegation);
     for (const mainProfiles of [[], ["advisor", "advisor"], ["worker"]]) {
       const input = { delegation: { ...delegation, mainProfiles } };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    }
+  });
+
+  it("rejects non-boolean persistence and unknown profile fields", () => {
+    for (const fields of [{ persistent: "true" }, { persistent: null }, { persist: true }]) {
+      const input = {
+        delegation: { providerByVendor: {}, profiles: { advisor: { ...profile, ...fields } } },
+      };
       expect(() => decodeServerSettings(input)).toThrow();
       expect(() => decodeServerSettingsPatch(input)).toThrow();
     }
