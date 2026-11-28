@@ -15,9 +15,22 @@ describe(renderInheritedText, () => {
   it("omits inline and reference images without changing ordinary Markdown", () => {
     expect(
       renderInheritedText(
-        'Keep [link](https://example.test). ![nested [label]](<file:///synthetic/a (b).png> "hidden title") ![reference label][private-id]\n\n[private-id]: data:image/png;base64,c3ludGhldGlj',
+        'Keep [link](https://example.test) and [shared link][private-id]. ![nested [label]](<file:///synthetic/a (b).png> "hidden title") ![reference label][private-id]\n\n[private-id]: data:image/png;base64,c3ludGhldGlj',
       ),
-    ).toBe("Keep [link](https://example.test). [Image omitted] [Image omitted]\n\n");
+    ).toBe(
+      "Keep [link](https://example.test) and [shared link][private-id]. [Image omitted] [Image omitted]\n\n",
+    );
+  });
+
+  it("omits raw HTML images and picture alternatives while preserving nearby text and code", () => {
+    const inline =
+      '<IMG src="file:///synthetic/inline.png" alt="private > alt" title="private title">';
+    const block =
+      '<div>Before <picture data-src="file:///synthetic/wrapper.png">\n<source srcset="data:image/png;base64,c3ludGhldGlj"><img src="file:///synthetic/fallback.png">\n</picture> after</div>';
+    const code = `\`${inline}\`\n\n\`\`\`html\n${block}\n\`\`\``;
+    expect(renderInheritedText(`Left ${inline} right\n\n${block}\n\n${code}`)).toBe(
+      `Left [Image omitted] right\n\n<div>Before [Image omitted] after</div>\n\n${code}`,
+    );
   });
 
   it("omits image data from decoded citation text and comments", () => {

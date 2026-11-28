@@ -9,43 +9,8 @@ import {
 } from "@t3tools/shared/assistantCitations";
 
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
-import { parseMarkdownWithMath } from "@t3tools/shared/markdownMath";
+import { omitMarkdownImages } from "@t3tools/shared/markdownImageRedaction";
 import { withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
-
-function omitMarkdownImages(text: string): string {
-  if (!text.includes("![")) return text;
-  const tree = parseMarkdownWithMath(text);
-  const ranges: Array<{ start: number; end: number; replacement: string }> = [];
-  const imageReferences = new Set<string>();
-  type Node = (typeof tree.children)[number];
-  const addRange = (node: Node, replacement: string) => {
-    const start = node.position?.start.offset;
-    const end = node.position?.end.offset;
-    if (start !== undefined && end !== undefined) ranges.push({ start, end, replacement });
-  };
-  const definitions: Array<Extract<Node, { type: "definition" }>> = [];
-  const visit = (node: Node) => {
-    if (node.type === "image" || node.type === "imageReference") {
-      addRange(node, "[Image omitted]");
-      if (node.type === "imageReference") imageReferences.add(node.identifier);
-    } else if (node.type === "definition") {
-      definitions.push(node);
-    } else if ("children" in node) {
-      node.children.forEach(visit);
-    }
-  };
-  tree.children.forEach(visit);
-  for (const definition of definitions) {
-    if (imageReferences.has(definition.identifier)) addRange(definition, "");
-  }
-  let cursor = 0;
-  let result = "";
-  for (const { start, end, replacement } of ranges.sort((a, b) => a.start - b.start)) {
-    result += text.slice(cursor, start) + replacement;
-    cursor = end;
-  }
-  return result + text.slice(cursor);
-}
 
 export function renderInheritedText(
   text: string,
