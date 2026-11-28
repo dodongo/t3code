@@ -4690,7 +4690,7 @@ const make = Effect.gen(function* () {
                 ),
           ),
         );
-      const { delegationProfile, modelSelection } = target.thread;
+      const { delegationProfile, modelSelection } = result.projection.thread;
       const profileNotice =
         delegationProfile == null
           ? undefined
@@ -4704,11 +4704,7 @@ const make = Effect.gen(function* () {
                 profile.providerInstanceId,
               );
               if (route.instanceId === null) return;
-              const thinkingId = route.driver === "pi" ? "thinking" : "effort";
-              const oldThinking =
-                route.driver === "antigravity"
-                  ? modelSelection.options?.[0]?.value
-                  : modelSelection.options?.find(({ id }) => id === thinkingId)?.value;
+              const oldThinking = modelSelection.options?.[0]?.value;
               const newThinking = profile.options?.thinking;
               const sameModel = route.model === modelSelection.model && oldThinking === newThinking;
               const sameFamily =
