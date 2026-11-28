@@ -72,7 +72,11 @@ import {
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
+import {
+  getProviderOptionCurrentValue,
+  modelSelectionsEqual,
+  withLegacyUltracodeEffort,
+} from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -1405,6 +1409,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
   const persistentDelegationLock = yield* KeyedLock.make<ThreadId>();
+  const persistentSelectionLock = yield* KeyedLock.make<ThreadId>();
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -1750,15 +1755,13 @@ const make = Effect.gen(function* () {
       resolve: (providers) => resolveTarget({ ...input, providers }),
     });
 
-  const preflightProfile = Effect.fn("OrchestratorMcpService.preflightProfile")(function* (input: {
+  const resolveProfile = Effect.fn("OrchestratorMcpService.resolveProfile")(function* (input: {
     readonly route: Effect.Success<ReturnType<typeof resolveDelegationRoute>>;
     readonly profile: DelegationSettings["profiles"][string];
     readonly providers: ReadonlyArray<ServerProvider>;
     readonly adapters: ReadonlySet<ServerProvider["instanceId"]>;
     readonly settings: Settings;
     readonly projectId: ProjectId | undefined;
-    readonly parentMode: RuntimeMode;
-    readonly requestedMode?: OrchestratorMcpDelegateTaskInput["runtimeMode"];
     readonly refresh?: { readonly cwd: string | undefined };
   }) {
     const { instanceId, driver, vendor, model } = input.route;
@@ -1812,7 +1815,7 @@ const make = Effect.gen(function* () {
       });
       return { modelSelection, supportedRuntimeModes: provider.supportedRuntimeModes };
     });
-    const target = yield* input.refresh === undefined
+    return yield* input.refresh === undefined
       ? resolve(input.providers)
       : resolveInWorkspace({
           instanceId,
@@ -1820,8 +1823,6 @@ const make = Effect.gen(function* () {
           cwd: input.refresh.cwd,
           resolve,
         });
-    const runtimeMode = yield* resolveRuntimeMode(input.parentMode, input.requestedMode, target);
-    return { modelSelection: target.modelSelection, runtimeMode };
   });
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
@@ -3198,15 +3199,17 @@ const make = Effect.gen(function* () {
                     profile.model,
                     profile.providerInstanceId,
                   );
-                  const constraint = yield* preflightProfile({
+                  const constraint = yield* resolveProfile({
                     route,
                     profile,
                     providers,
                     adapters: orchestrationCapableInstanceIds,
                     settings,
                     projectId: parent?.thread.projectId,
-                    parentMode: limits.runtimeMode,
                   }).pipe(
+                    Effect.tap((target) =>
+                      resolveRuntimeMode(limits.runtimeMode, undefined, target),
+                    ),
                     Effect.flatMap(({ modelSelection }) =>
                       requireSkillDenyListSupport(providerAdapters, modelSelection.instanceId, {
                         deniedSkills: profile.deniedSkills,
@@ -3466,8 +3469,9 @@ const make = Effect.gen(function* () {
         );
       }
       const childProfileName = profileName ?? callerProfileName;
+      const childProfile = profiled?.profile ?? callerProfile;
       const checkPersistentDelegation =
-        childProfileName !== undefined && (profiled?.profile ?? callerProfile)?.persistent === true
+        childProfileName !== undefined && childProfile?.persistent === true
           ? Effect.gen(function* () {
               const childIds = yield* threadManagement
                 .listAppOwnedChildThreadIds(scope.thread.threadId)
@@ -3487,6 +3491,60 @@ const make = Effect.gen(function* () {
 
                 const receipt = yield* replay;
                 if (Option.isSome(receipt)) return receipt;
+                const reusable = yield* persistentSelectionLock.withLock(
+                  childThreadId,
+                  Effect.gen(function* () {
+                    const { modelSelection } = yield* resolveProfile({
+                      route: yield* resolveDelegationRoute(
+                        settings.delegation.providerByVendor,
+                        childProfile.model,
+                        childProfile.providerInstanceId,
+                      ),
+                      profile: childProfile,
+                      providers: yield* loadProviders,
+                      adapters: yield* loadOrchestrationCapableInstanceIds(),
+                      settings,
+                      projectId: thread.projectId,
+                      refresh: { cwd: yield* parentWorkspaceCwd({ thread }) },
+                    });
+                    const current = yield* threadManagement
+                      .getThreadShell(childThreadId)
+                      .pipe(Effect.mapError(threadManagementFailure));
+                    if (current?.archivedAt !== null || current.deletedAt !== null) return false;
+                    if (!modelSelectionsEqual(current.modelSelection, modelSelection)) {
+                      yield* requireSkillDenyListSupport(
+                        providerAdapters,
+                        modelSelection.instanceId,
+                        {
+                          deniedSkills: thread.deniedSkills,
+                          delegationProfile: childProfileName,
+                        },
+                      ).pipe(Effect.mapError((error) => failure("invalid_request", error.message)));
+                      yield* threadManagement
+                        .dispatch({
+                          type: "provider.switch",
+                          commandId: stableCommandId({
+                            scope,
+                            requestKey: yield* requestKey(undefined),
+                            operation: "refresh-persistent-child-selection",
+                          }),
+                          threadId: childThreadId,
+                          modelSelection,
+                        })
+                        .pipe(
+                          Effect.catchTags({
+                            OrchestratorProviderSelectionBusyError: () => Effect.void,
+                          }),
+                          Effect.mapError(threadManagementFailure),
+                        );
+                    }
+                    const refreshed = yield* threadManagement
+                      .getThreadShell(childThreadId)
+                      .pipe(Effect.mapError(threadManagementFailure));
+                    return refreshed?.archivedAt === null && refreshed.deletedAt === null;
+                  }),
+                );
+                if (!reusable) continue;
                 const followUp = yield* encodeThreadSendInput({
                   threadId: childThreadId,
                   message: "<follow-up task>",
@@ -3522,20 +3580,26 @@ const make = Effect.gen(function* () {
             );
             return { modelSelection: target.modelSelection, runtimeMode };
           })
-        : preflightProfile({
-            route: yield* resolveDelegationRoute(
-              settings.delegation.providerByVendor,
-              input.target?.model ?? profiled.profile.model,
-              profiled.profile.providerInstanceId,
-            ),
-            profile: profiled.profile,
-            providers,
-            adapters: yield* loadOrchestrationCapableInstanceIds(),
-            settings,
-            projectId: parent.thread.projectId,
-            parentMode: parent.thread.runtimeMode,
-            requestedMode: input.runtimeMode,
-            refresh: { cwd },
+        : Effect.gen(function* () {
+            const target = yield* resolveProfile({
+              route: yield* resolveDelegationRoute(
+                settings.delegation.providerByVendor,
+                input.target?.model ?? profiled.profile.model,
+                profiled.profile.providerInstanceId,
+              ),
+              profile: profiled.profile,
+              providers,
+              adapters: yield* loadOrchestrationCapableInstanceIds(),
+              settings,
+              projectId: parent.thread.projectId,
+              refresh: { cwd },
+            });
+            const runtimeMode = yield* resolveRuntimeMode(
+              parent.thread.runtimeMode,
+              input.runtimeMode,
+              target,
+            );
+            return { modelSelection: target.modelSelection, runtimeMode };
           });
       const interactionMode = parent.thread.interactionMode;
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
