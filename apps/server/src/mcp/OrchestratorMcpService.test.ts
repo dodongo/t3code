@@ -90,7 +90,6 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
-import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -6413,11 +6412,16 @@ describe("OrchestratorMcpService live threads", () => {
     const beforeProviderRead = yield* Ref.make(Effect.void);
     const afterSettingsRead = yield* Ref.make(Effect.void);
     const piDriver = ProviderDriverKind.make("pi");
+    const antigravity = {
+      instanceId: ProviderInstanceId.make("antigravity"),
+      driver: ProviderDriverKind.make("antigravity"),
+    };
     const projectId = ProjectId.make("project:mcp-cwd");
     const adapters = ProviderAdapterRegistry.layerFromAdapters([
       liveAdapter(),
       liveAdapter({ instanceId: pi, driver: piDriver }),
       liveAdapter({ instanceId: otherPi, driver: piDriver }),
+      liveAdapter(antigravity),
     ]);
     const database = SqlitePersistence.layerMemory;
     const orchestrationLayer = ProviderReplayHarness.layerWithRegistry(
@@ -6440,6 +6444,7 @@ describe("OrchestratorMcpService live threads", () => {
       providerInstances: {
         [pi]: { driver: "pi", enabled: true },
         [otherPi]: { driver: "pi", enabled: true },
+        [antigravity.instanceId]: { driver: "antigravity", enabled: true },
       },
       delegation: {
         providerByVendor: { openai: pi },
@@ -6447,6 +6452,12 @@ describe("OrchestratorMcpService live threads", () => {
           shared: sharedProfile,
           worktree: { ...sharedProfile, checkout: "worktree" },
           advisor,
+          antigravity: {
+            ...advisor,
+            providerInstanceId: antigravity.instanceId,
+            model: "google:gemini-4-neon-high",
+            options: { thinking: "high" },
+          },
           reviewer: { ...sharedProfile, persistent: true },
           transient: { ...sharedProfile, persistent: false },
         },
@@ -6490,6 +6501,7 @@ describe("OrchestratorMcpService live threads", () => {
                 { instanceId, driver },
                 { instanceId: pi, driver: piDriver },
                 { instanceId: otherPi, driver: piDriver },
+                antigravity,
               ].map((provider): ServerProvider => ({
                 ...provider,
                 enabled: true,
@@ -6498,7 +6510,13 @@ describe("OrchestratorMcpService live threads", () => {
                 status: "ready",
                 auth: { status: "authenticated" },
                 checkedAt: "2026-09-13T00:00:00.000Z",
-                models: [modelSelection.model, "gpt-6-sol", "gpt-6-astra"].map((slug) => ({
+                models: [
+                  modelSelection.model,
+                  "gpt-6-sol",
+                  "gpt-6-astra",
+                  "gemini-4-neon",
+                  "gemini-4-pro",
+                ].map((slug) => ({
                   slug,
                   name: slug,
                   isCustom: false,
@@ -6506,12 +6524,14 @@ describe("OrchestratorMcpService live threads", () => {
                     optionDescriptors: [
                       {
                         type: "select",
-                        id: "thinking",
+                        id: provider === antigravity ? "thought_level" : "thinking",
                         label: "Thinking",
                         role: "reasoning",
                         options: [
                           { id: "medium", label: "Medium" },
-                          { id: "xhigh", label: "Extra High" },
+                          provider === antigravity
+                            ? { id: "high", label: "High" }
+                            : { id: "xhigh", label: "Extra High" },
                         ],
                       },
                     ],
@@ -6831,7 +6851,13 @@ describe("OrchestratorMcpService live threads", () => {
       }),
   );
 
-  it.effect.each(["drifted", "undrifted", "unprofiled"] as const)(
+  it.effect.each([
+    "drifted",
+    "undrifted",
+    "unprofiled",
+    "normalized Antigravity",
+    "Antigravity drift",
+  ] as const)(
     "sendToThread: keeps the child's model selection and reports profile drift (%s)",
     (scenario) =>
       Effect.gen(function* () {
@@ -6839,7 +6865,14 @@ describe("OrchestratorMcpService live threads", () => {
           yield* delegationFixture;
         const { childThreadId, childRunId } = yield* service.delegateTask(scope, {
           task: "Review the changes.",
-          ...(scenario === "unprofiled" ? {} : { profile: "advisor" }),
+          ...(scenario === "unprofiled"
+            ? {}
+            : {
+                profile:
+                  scenario.endsWith("Antigravity") || scenario === "Antigravity drift"
+                    ? "antigravity"
+                    : "advisor",
+              }),
         });
         if (childThreadId === null) return yield* Effect.die("Expected a delegated child.");
         yield* worker.drain();
@@ -6858,7 +6891,28 @@ describe("OrchestratorMcpService live threads", () => {
             },
           ],
         });
-        if (scenario !== "undrifted") {
+        if (scenario === "normalized Antigravity") {
+          assert.equal(before.thread.modelSelection.model, "gemini-4-neon");
+          assert.deepEqual(before.thread.modelSelection.options, [
+            { id: "thought_level", value: "high" },
+          ]);
+        }
+        if (scenario === "Antigravity drift") {
+          const { delegation } = yield* serverSettings.getSettings;
+          yield* serverSettings.updateSettings({
+            delegation: {
+              ...delegation,
+              profiles: {
+                ...delegation.profiles,
+                antigravity: {
+                  ...delegation.profiles.antigravity!,
+                  model: "google:gemini-4-pro",
+                },
+              },
+            },
+          });
+        }
+        if (scenario === "drifted" || scenario === "unprofiled") {
           const { delegation } = yield* serverSettings.getSettings;
           yield* serverSettings.updateSettings({
             delegation: {
@@ -6891,21 +6945,13 @@ describe("OrchestratorMcpService live threads", () => {
         );
         assert.equal(after.messages.find(({ id }) => id === sent.messageId)?.text, message);
 
-        const output = OrchestratorToolkit.tools.t3_thread_send.toModelOutput?.(sent) ?? [
-          { type: "text", text: JSON.stringify(sent) },
-        ];
-        assert.deepEqual(
-          output
-            .slice(1)
-            .map((part) => (part.type === "text" ? { type: part.type, text: part.text } : part)),
+        assert.equal(
+          "profileNotice" in sent ? sent.profileNotice : undefined,
           scenario === "drifted"
-            ? [
-                {
-                  type: "text",
-                  text: "This child runs gpt-6-sol (pi, thinking=xhigh); its profile now uses gpt-6-astra (pi_other, thinking=medium). Call delegate_task with profile advisor to switch it.",
-                },
-              ]
-            : [],
+            ? "This child runs gpt-6-sol (pi, thinking=xhigh); its profile now uses gpt-6-astra (pi_other, thinking=medium). Call delegate_task with profile advisor to switch it."
+            : scenario === "Antigravity drift"
+              ? "This child runs gemini-4-neon (antigravity, thinking=high); its profile now uses gemini-4-pro (antigravity, thinking=high). Call delegate_task with profile antigravity to switch it."
+              : undefined,
         );
       }),
   );
