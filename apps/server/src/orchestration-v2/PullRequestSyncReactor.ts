@@ -877,7 +877,9 @@ export const make = Effect.gen(function* () {
           case "thread.settled":
             return inThreadOrder(event.threadId, refreshUnmergedLinks(event.threadId));
           case "run.updated":
-            return isTerminalRunStatus(event.payload.status) && closeCommands.delete(event.threadId)
+            return isTerminalRunStatus(event.payload.status) &&
+              !(event.payload.status === "cancelled" && event.payload.startedAt === null) &&
+              closeCommands.delete(event.threadId)
               ? inThreadOrder(event.threadId, refreshUnmergedLinks(event.threadId))
               : Effect.void;
           default:

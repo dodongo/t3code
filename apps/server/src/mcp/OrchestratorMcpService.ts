@@ -3993,7 +3993,6 @@ const make = Effect.gen(function* () {
           yield* assertStoppable(childThreadId);
         }
       });
-      yield* assertStoppable(childThreadId);
       const parentTask = (yield* loadTasks(scope.thread.threadId, [input.taskId])).find(
         (task) => task.id === input.taskId && task.origin === "app_owned",
       );
@@ -4006,7 +4005,7 @@ const make = Effect.gen(function* () {
                 commandId: stableCommandId({
                   scope,
                   requestKey: key,
-                  operation: "cancel-task-completion-delivery",
+                  operation: `cancel-task-completion-delivery:${input.taskId}`,
                 }),
                 parentThreadId: scope.thread.threadId,
                 taskId: input.taskId,
@@ -4020,8 +4019,30 @@ const make = Effect.gen(function* () {
                   ),
                 ),
               );
+      const noInterruptibleRun = failure(
+        "task_not_cancellable",
+        `Delegated task ${input.taskId} has no interruptible child run.`,
+      );
+      const hasInterruptibleWork = Effect.fn("OrchestratorMcpService.hasInterruptibleWork")(
+        function* () {
+          if (current.workState === "waiting_for_children") return true;
+          const child = yield* loadThreadRecords(childThreadId, ["runs"]);
+          return (
+            ThreadManagementService.latestActiveRun(child) !== undefined ||
+            child.runs.some(
+              (run) =>
+                run.status === "queued" &&
+                (run.delegatedTaskId === input.taskId || run.id === current.childRunId),
+            )
+          );
+        },
+      );
       const stopChild = Effect.gen(function* () {
-        const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
+        const commandId = stableCommandId({
+          scope,
+          requestKey: key,
+          operation: `cancel-task:${input.taskId}`,
+        });
         const reason = agentStopReason(input.reason);
         const command = {
           type: "thread.stop" as const,
@@ -4036,19 +4057,28 @@ const make = Effect.gen(function* () {
             taskId: input.taskId,
             command,
             stopDescendants: (remoteDispatch) =>
-              threadManagement.stopDelegatedTasks({
-                threadId: childThreadId,
-                commandId,
-                reason,
-                remoteDispatch,
-              }),
+              (current.status === "queued" ? hasInterruptibleWork() : Effect.succeed(true)).pipe(
+                Effect.flatMap((eligible) =>
+                  eligible ? assertStoppable(childThreadId) : Effect.fail(noInterruptibleRun),
+                ),
+                Effect.andThen(
+                  threadManagement.stopDelegatedTasks({
+                    threadId: childThreadId,
+                    commandId,
+                    reason,
+                    remoteDispatch,
+                  }),
+                ),
+              ),
           })
           .pipe(
             Effect.mapError((error) =>
-              failure(
-                "task_not_cancellable",
-                `Unable to stop delegated task ${input.taskId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-              ),
+              error._tag === "OrchestratorMcpFailure"
+                ? error
+                : failure(
+                    "task_not_cancellable",
+                    `Unable to stop delegated task ${input.taskId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                  ),
             ),
           );
         const stopped = yield* threadManagement
@@ -4076,8 +4106,7 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(threadManagementFailure));
         }
       });
-      // Checked above; a user raising one of these threads meanwhile is
-      // caught again under that thread's lock, which leaves it running.
+      // Recheck modes under each thread's lock after preflight.
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
       const stopWithinLimit = stopChild.pipe(
         Effect.provideService(DispatchModeLimit, {
@@ -4110,7 +4139,7 @@ const make = Effect.gen(function* () {
           commandId: stableCommandId({
             scope,
             requestKey: key,
-            operation: "cancel-task-orphan",
+            operation: `cancel-task-orphan:${input.taskId}`,
           }),
           threadId: scope.thread.threadId,
           runId: parentTask.runId,
@@ -4133,23 +4162,17 @@ const make = Effect.gen(function* () {
           status: cancelled ? "cancelled" : current.status,
         } satisfies OrchestratorMcpTaskCancelResult;
       }
-      const child = yield* loadThreadRecords(childThreadId, ["runs"]);
-      if (
-        current.workState !== "waiting_for_children" &&
-        ThreadManagementService.latestActiveRun(child) === undefined &&
-        !child.runs.some(
-          (run) =>
-            run.status === "queued" &&
-            (run.delegatedTaskId === input.taskId || run.id === current.childRunId),
-        )
-      ) {
+      if (current.status !== "queued" && !(yield* hasInterruptibleWork())) {
         if (yield* cancelOrphan) return { taskId: input.taskId, status: "cancelled" };
-        return yield* failure(
-          "task_not_cancellable",
-          `Delegated task ${input.taskId} has no interruptible child run.`,
-        );
+        return yield* noInterruptibleRun;
       }
-      yield* stopWithinLimit;
+      const stopResult = yield* Effect.result(stopWithinLimit);
+      if (stopResult._tag === "Failure") {
+        if (stopResult.failure === noInterruptibleRun && (yield* cancelOrphan)) {
+          return { taskId: input.taskId, status: "cancelled" };
+        }
+        return yield* stopResult.failure;
+      }
       yield* disposeCompletionDelivery.pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("orchestrator-mcp.cancel-task.delivery-dispose-failed", {
