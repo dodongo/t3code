@@ -130,6 +130,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { ANTIGRAVITY_PROFILE_THINKING_OPTION } from "../provider/acp/AntigravityAcpSupport.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -4690,6 +4691,37 @@ const make = Effect.gen(function* () {
                 ),
           ),
         );
+      const { delegationProfile, modelSelection } = target.thread;
+      const profileNotice =
+        delegationProfile == null
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const { delegation } = yield* serverSettings.getSettings;
+              const profile = delegation.profiles[delegationProfile];
+              if (profile?.persistent !== true) return;
+              const route = yield* resolveDelegationRoute(
+                delegation.providerByVendor,
+                profile.model,
+                profile.providerInstanceId,
+              );
+              if (route.instanceId === null) return;
+              const oldThinking = modelSelection.options?.find(
+                ({ id }) =>
+                  id === "thinking" ||
+                  id === "effort" ||
+                  id === ANTIGRAVITY_PROFILE_THINKING_OPTION,
+              )?.value;
+              const newThinking = profile.options?.thinking;
+              if (
+                route.instanceId === modelSelection.instanceId &&
+                route.model === modelSelection.model &&
+                oldThinking === newThinking
+              )
+                return;
+              const old = `${modelSelection.model} (${modelSelection.instanceId}${oldThinking === undefined ? "" : `, thinking=${oldThinking}`})`;
+              const next = `${route.model} (${route.instanceId}${newThinking === undefined ? "" : `, thinking=${newThinking}`})`;
+              return `This child runs ${old}; its profile now uses ${next}. Call delegate_task with profile ${delegationProfile} to switch it.`;
+            }).pipe(Effect.orElseSucceed(() => undefined));
       return {
         threadId: input.threadId,
         link: threadLinkFor(scope, input.threadId, target.thread.title),
@@ -4698,6 +4730,7 @@ const make = Effect.gen(function* () {
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
         status: result.run.status,
         delivery: result.delivery,
+        ...(profileNotice === undefined ? {} : { profileNotice }),
       } satisfies OrchestratorMcpThreadSendResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {
