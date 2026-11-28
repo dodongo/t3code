@@ -4707,14 +4707,16 @@ const make = Effect.gen(function* () {
               const thinkingId = route.driver === "pi" ? "thinking" : "effort";
               const oldThinking =
                 route.driver === "antigravity"
-                  ? undefined
+                  ? modelSelection.options?.[0]?.value
                   : modelSelection.options?.find(({ id }) => id === thinkingId)?.value;
               const newThinking = profile.options?.thinking;
-              if (
-                route.instanceId === modelSelection.instanceId &&
-                (route.driver === "antigravity" ||
-                  (route.model === modelSelection.model && oldThinking === newThinking))
-              )
+              const sameModel = route.model === modelSelection.model && oldThinking === newThinking;
+              const sameFamily =
+                route.driver === "antigravity" &&
+                typeof oldThinking === "string" &&
+                route.model === `${modelSelection.model}-${oldThinking}` &&
+                (newThinking === undefined || newThinking === oldThinking);
+              if (route.instanceId === modelSelection.instanceId && (sameModel || sameFamily))
                 return;
               const old = `${modelSelection.model} (${modelSelection.instanceId}${oldThinking === undefined ? "" : `, thinking=${oldThinking}`})`;
               const next = `${route.model} (${route.instanceId}${newThinking === undefined ? "" : `, thinking=${newThinking}`})`;
