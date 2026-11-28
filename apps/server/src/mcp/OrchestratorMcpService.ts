@@ -2232,7 +2232,7 @@ const make = Effect.gen(function* () {
           : delegatedTaskAwaitsWork(followupRuns, childControls)
             ? "waiting_for_children"
             : "result_available";
-    const heldForRestart =
+    const completionPending =
       task.result === null &&
       taskWorkState === "result_available" &&
       (yield* threadManagement
@@ -2241,7 +2241,7 @@ const make = Effect.gen(function* () {
     const terminalRun = latestTerminalResultRun(
       childControls,
       childRun,
-      heldForRestart ? taskResultRun : undefined,
+      completionPending ? taskResultRun : undefined,
     );
     // Only the task's own result looks back for its report, and only among its own runs.
     const reportRuns =
@@ -2274,7 +2274,7 @@ const make = Effect.gen(function* () {
         run,
       ).text;
     const workState =
-      task.result !== null ? "result_available" : heldForRestart ? "working" : taskWorkState;
+      task.result !== null ? "result_available" : completionPending ? "working" : taskWorkState;
     const runStatus = taskStatusForRun(taskResultRun ?? childRun);
     const status =
       task.result !== null
