@@ -139,6 +139,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import {
   clientModeCeiling,
+  McpInvocationContext,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
@@ -152,7 +153,13 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { assertSameLink } from "./linkOrigin.ts";
+import {
+  assertTargetWithinLimits,
+  isLiveCallerShell,
+  loadCaller as loadConfigurationCaller,
+  threadNotFound,
+} from "./threadAccess.ts";
 import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
 import { buildDelegatedFirstMessage, renderInheritedText } from "./delegatedContext.ts";
 import {
@@ -1409,7 +1416,6 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
   const persistentDelegationLock = yield* KeyedLock.make<ThreadId>();
-  const persistentSelectionLock = yield* KeyedLock.make<ThreadId>();
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -3472,28 +3478,27 @@ const make = Effect.gen(function* () {
       const childProfile = profiled?.profile ?? callerProfile;
       const checkPersistentDelegation =
         childProfileName !== undefined && childProfile?.persistent === true
-          ? Effect.gen(function* () {
-              const childIds = yield* threadManagement
-                .listAppOwnedChildThreadIds(scope.thread.threadId)
-                .pipe(Effect.mapError(threadManagementFailure));
-              for (const childThreadId of childIds) {
-                const shell = yield* threadManagement
-                  .getThreadShell(childThreadId)
+          ? (locked: boolean) =>
+              Effect.gen(function* () {
+                const childIds = yield* threadManagement
+                  .listAppOwnedChildThreadIds(scope.thread.threadId)
                   .pipe(Effect.mapError(threadManagementFailure));
-                if (shell?.archivedAt !== null || shell.deletedAt !== null) continue;
-                const { thread } = yield* loadThreadRecords(childThreadId, []);
-                if (
-                  thread.delegationProfile !== childProfileName ||
-                  thread.archivedAt !== null ||
-                  thread.deletedAt !== null
-                )
-                  continue;
+                for (const childThreadId of childIds) {
+                  const shell = yield* threadManagement
+                    .getThreadShell(childThreadId)
+                    .pipe(Effect.mapError(threadManagementFailure));
+                  if (shell?.archivedAt !== null || shell.deletedAt !== null) continue;
+                  const { thread } = yield* loadThreadRecords(childThreadId, []);
+                  if (
+                    thread.delegationProfile !== childProfileName ||
+                    thread.archivedAt !== null ||
+                    thread.deletedAt !== null
+                  )
+                    continue;
 
-                const receipt = yield* replay;
-                if (Option.isSome(receipt)) return receipt;
-                const reusable = yield* persistentSelectionLock.withLock(
-                  childThreadId,
-                  Effect.gen(function* () {
+                  const refresh = Effect.gen(function* () {
+                    const receipt = yield* replay;
+                    if (Option.isSome(receipt)) return receipt;
                     const { modelSelection } = yield* resolveProfile({
                       route: yield* resolveDelegationRoute(
                         settings.delegation.providerByVendor,
@@ -3510,8 +3515,20 @@ const make = Effect.gen(function* () {
                     const current = yield* threadManagement
                       .getThreadShell(childThreadId)
                       .pipe(Effect.mapError(threadManagementFailure));
-                    if (current?.archivedAt !== null || current.deletedAt !== null) return false;
+                    if (current?.archivedAt !== null || current.deletedAt !== null)
+                      return Option.none();
                     if (!modelSelectionsEqual(current.modelSelection, modelSelection)) {
+                      const caller = yield* loadConfigurationCaller().pipe(
+                        Effect.provideService(McpInvocationContext, scope),
+                        Effect.provideService(
+                          ThreadManagementService.ThreadManagementService,
+                          threadManagement,
+                        ),
+                      );
+                      const { limits } = caller;
+                      yield* assertTargetWithinLimits(limits, current);
+                      yield* assertSameLink(caller, current);
+                      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
                       yield* requireSkillDenyListSupport(
                         providerAdapters,
                         modelSelection.instanceId,
@@ -3532,34 +3549,48 @@ const make = Effect.gen(function* () {
                           modelSelection,
                         })
                         .pipe(
-                          Effect.catchTags({
-                            OrchestratorProviderSelectionBusyError: () => Effect.void,
-                          }),
-                          Effect.mapError(threadManagementFailure),
+                          Effect.provideService(DispatchModeLimit, { ...limits, refused }),
+                          Effect.catch((error) =>
+                            Effect.flatMap(Ref.get(refused), (refusal) =>
+                              Effect.fail(
+                                refusal === undefined
+                                  ? threadManagementFailure(error)
+                                  : failure(
+                                      refusal.mode === "runtime"
+                                        ? "runtime_mode_escalation_denied"
+                                        : "interaction_mode_escalation_denied",
+                                      `Thread ${refusal.threadId} runs in ${refusal.runtimeMode}/${refusal.interactionMode}, above this caller's limit.`,
+                                    ),
+                              ),
+                            ),
+                          ),
                         );
                     }
                     const refreshed = yield* threadManagement
                       .getThreadShell(childThreadId)
                       .pipe(Effect.mapError(threadManagementFailure));
-                    return refreshed?.archivedAt === null && refreshed.deletedAt === null;
-                  }),
-                );
-                if (!reusable) continue;
-                const followUp = yield* encodeThreadSendInput({
-                  threadId: childThreadId,
-                  message: "<follow-up task>",
-                  mode: "queue",
-                }).pipe(Effect.orDie);
-                return yield* failure(
-                  "invalid_request",
-                  `Profile ${childProfileName} already has a child thread. Reuse it with t3_thread_send(${followUp}).`,
-                );
-              }
-              return Option.none();
-            })
+                    if (refreshed?.archivedAt !== null || refreshed.deletedAt !== null)
+                      return Option.none();
+                    const followUp = yield* encodeThreadSendInput({
+                      threadId: childThreadId,
+                      message: "<follow-up task>",
+                      mode: "queue",
+                    }).pipe(Effect.orDie);
+                    return yield* failure(
+                      "invalid_request",
+                      `Profile ${childProfileName} already has a child thread. Reuse it with t3_thread_send(${followUp}).`,
+                    );
+                  });
+                  const receipt = yield* locked
+                    ? refresh
+                    : persistentDelegationLock.withLock(scope.thread.threadId, refresh);
+                  if (Option.isSome(receipt)) return receipt;
+                }
+                return Option.none();
+              })
           : undefined;
       if (checkPersistentDelegation !== undefined) {
-        const receipt = yield* checkPersistentDelegation;
+        const receipt = yield* checkPersistentDelegation(false);
         if (Option.isSome(receipt))
           return yield* finishDelegation(scope, input, key, commandId, receipt.value);
       }
@@ -3834,7 +3865,7 @@ const make = Effect.gen(function* () {
             : Effect.scoped(
                 Effect.gen(function* () {
                   yield* restore(persistentDelegationLock.acquireScoped(scope.thread.threadId));
-                  const receipt = yield* restore(checkPersistentDelegation);
+                  const receipt = yield* restore(checkPersistentDelegation(true));
                   return Option.isSome(receipt) ? receipt.value : yield* dispatch;
                 }),
               );

@@ -6406,11 +6406,13 @@ describe("OrchestratorMcpService live threads", () => {
     const path = yield* Path.Path;
     const parentCwd = yield* fs.makeTempDirectoryScoped({ prefix: "mcp-delegation-parent-" });
     const pi = ProviderInstanceId.make("pi");
+    const otherPi = ProviderInstanceId.make("pi_other");
     const piDriver = ProviderDriverKind.make("pi");
     const projectId = ProjectId.make("project:mcp-cwd");
     const adapters = ProviderAdapterRegistry.layerFromAdapters([
       liveAdapter(),
       liveAdapter({ instanceId: pi, driver: piDriver }),
+      liveAdapter({ instanceId: otherPi, driver: piDriver }),
     ]);
     const database = SqlitePersistence.layerMemory;
     const orchestrationLayer = ProviderReplayHarness.layerWithRegistry(
@@ -6432,6 +6434,7 @@ describe("OrchestratorMcpService live threads", () => {
     const settings = ServerSettings.layerTest({
       providerInstances: {
         [pi]: { driver: "pi", enabled: true },
+        [otherPi]: { driver: "pi", enabled: true },
       },
       delegation: {
         providerByVendor: { openai: pi },
@@ -6470,6 +6473,7 @@ describe("OrchestratorMcpService live threads", () => {
               [
                 { instanceId, driver },
                 { instanceId: pi, driver: piDriver },
+                { instanceId: otherPi, driver: piDriver },
               ].map((provider) => ({
                 ...provider,
                 enabled: true,
@@ -6577,6 +6581,7 @@ describe("OrchestratorMcpService live threads", () => {
         startParent,
         serverSettings,
         advisor,
+        otherPi,
       };
     }).pipe(Effect.provide(context));
   }).pipe(Effect.provide(NodeServices.layer));
@@ -6804,6 +6809,44 @@ describe("OrchestratorMcpService live threads", () => {
         assert.equal(current.message, hint.message);
         assert.deepEqual(commands, []);
       }),
+  );
+
+  it.effect("delegateTask: refuses a busy persistent provider switch and checks child modes", () =>
+    Effect.gen(function* () {
+      const { advisor, orchestration, otherPi, service, scope, serverSettings } =
+        yield* delegationFixture;
+      const request = { task: "Review the changes.", profile: "advisor" };
+      const { childThreadId } = yield* service.delegateTask(scope, request);
+      if (childThreadId === null) return yield* Effect.die("Expected a persistent child.");
+      const before = yield* orchestration.getThreadProjection(childThreadId);
+      const { delegation } = yield* serverSettings.getSettings;
+      yield* serverSettings.updateSettings({
+        delegation: {
+          ...delegation,
+          profiles: {
+            ...delegation.profiles,
+            advisor: { ...advisor, providerInstanceId: otherPi },
+          },
+        },
+      });
+      const busy = yield* service.delegateTask(scope, request).pipe(Effect.flip);
+      assert.equal(busy.code, "orchestration_error");
+      assert.include(busy.message, "has an active turn. Wait for it to finish");
+      assert.notInclude(busy.message, "t3_thread_send");
+
+      yield* orchestration.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("restrict-persistent-parent"),
+        threadId: scope.thread.threadId,
+        runtimeMode: "approval-required",
+      });
+      const denied = yield* service.delegateTask(scope, request).pipe(Effect.flip);
+      assert.equal(denied.code, "runtime_mode_escalation_denied");
+      assert.notInclude(denied.message, "t3_thread_send");
+      const after = yield* orchestration.getThreadProjection(childThreadId);
+      assert.deepEqual(after.thread, before.thread);
+      assert.deepEqual(after.runs, before.runs);
+    }),
   );
 
   it.effect("delegateTask: cancels a persistent waiter before the first dispatch unlocks", () =>
