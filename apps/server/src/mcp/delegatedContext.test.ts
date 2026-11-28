@@ -48,7 +48,7 @@ describe(renderInheritedText, () => {
   });
 
   it("removes multiline HTML image attributes in quotes without consuming surrounding lines", () => {
-    for (const prefix of ["> ", "> > "]) {
+    for (const prefix of ["> ", "> > ", ">\t", ">\t>\t"]) {
       const quote = (lines: string[]) => lines.map((line) => prefix + line).join("\r\n");
       expect(
         renderInheritedText(

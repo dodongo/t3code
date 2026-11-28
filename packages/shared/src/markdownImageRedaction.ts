@@ -28,7 +28,7 @@ function imageRanges(text: string) {
   const tagPattern =
     /<!--[\s\S]*?(?:-->|$)|<(\/?)([a-z][\w:-]*)(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'"<>])*>/gi;
   const definitions: Array<Extract<Node, { type: "definition" }>> = [];
-  const mapOffsets = (value: string, start: number, end: number, allowInitialIndent: boolean) => {
+  const mapOffsets = (value: string, start: number, end: number) => {
     const authoredLines = text.slice(start, end).split(/(\r\n|\r|\n)/);
     const normalizedLines = value.split(/(\r\n|\r|\n)/);
     if (authoredLines.length !== normalizedLines.length) return;
@@ -38,14 +38,13 @@ function imageRanges(text: string) {
     for (let i = 0; i < authoredLines.length; i += 2) {
       const authored = authoredLines[i]!;
       const normalized = normalizedLines[i]!;
-      const prefixLength = authored.length - normalized.length;
-      if (
-        !authored.endsWith(normalized) ||
-        (i === 0 && !allowInitialIndent && prefixLength !== 0) ||
-        !/^[> \t]*$/.test(authored.slice(0, prefixLength))
-      )
-        return;
-      lineOffsets.push({ normalized: normalizedOffset, authored: authoredOffset + prefixLength });
+      const content = normalized.replace(/^[ \t]+/, "");
+      const contentStart = authored.length - content.length;
+      if (!authored.endsWith(content) || !/^[> \t]*$/.test(authored.slice(0, contentStart))) return;
+      lineOffsets.push({
+        normalized: normalizedOffset + normalized.length - content.length,
+        authored: authoredOffset + contentStart,
+      });
       authoredOffset += authored.length + (authoredLines[i + 1]?.length ?? 0);
       normalizedOffset += normalized.length + (normalizedLines[i + 1]?.length ?? 0);
     }
@@ -76,7 +75,7 @@ function imageRanges(text: string) {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
       if (start === undefined || end === undefined) return;
-      const toAuthored = mapOffsets(node.value, start, end, true);
+      const toAuthored = mapOffsets(node.value, start, end);
       if (!toAuthored) return;
       const trimmed = node.value.trim();
       const offset = node.value.length - node.value.trimStart().length - INLINE_PARSE_PREFIX.length;
@@ -94,7 +93,7 @@ function imageRanges(text: string) {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
       if (start === undefined || end === undefined) return;
-      const toAuthored = mapOffsets(node.value, start, end, false);
+      const toAuthored = mapOffsets(node.value, start, end);
       if (!toAuthored) return;
       for (const tag of node.value.matchAll(tagPattern)) {
         if (tag[2] === undefined) continue;
