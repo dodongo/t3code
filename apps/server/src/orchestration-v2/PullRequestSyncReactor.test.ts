@@ -346,8 +346,10 @@ const gitLabCliFailure = new PullRequestOperationError({
 function runUpdated(
   threadId: ThreadId,
   status: OrchestrationV2Run["status"],
+  started = true,
 ): OrchestrationV2DomainEvent {
-  const runId = RunId.make(`run:${threadId}:1`);
+  const ordinal = started ? 1 : 2;
+  const runId = RunId.make(`run:${threadId}:${ordinal}`);
   const at = DateTime.makeUnsafe(NOW);
   return {
     type: "run.updated",
@@ -358,7 +360,7 @@ function runUpdated(
     payload: {
       id: runId,
       threadId,
-      ordinal: 1,
+      ordinal,
       providerInstanceId: ProviderInstanceId.make("codex"),
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
       providerThreadId: null,
@@ -367,7 +369,7 @@ function runUpdated(
       activeAttemptId: null,
       status,
       requestedAt: at,
-      startedAt: at,
+      startedAt: started ? at : null,
       completedAt: at,
       checkpointId: null,
       contextHandoffId: null,
@@ -2058,7 +2060,13 @@ describe("PullRequestSyncReactor", () => {
         yield* Ref.set(state, "merged");
         yield* Ref.set(fixture.syncCommands, []);
 
-        yield* Queue.offer(fixture.domainEvents, runUpdated(ThreadId.make("agent"), "completed"));
+        const agent = ThreadId.make("agent");
+        yield* Queue.offer(fixture.domainEvents, runUpdated(agent, "cancelled", false));
+        yield* TestClock.adjust(1);
+        yield* reactor.drain;
+        assert.deepStrictEqual(yield* Ref.get(fixture.syncCommands), []);
+
+        yield* Queue.offer(fixture.domainEvents, runUpdated(agent, "completed"));
         yield* Queue.take(fixture.snapshotReads);
         yield* Queue.take(fixture.snapshotReads);
         yield* reactor.drain;

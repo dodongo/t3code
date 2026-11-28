@@ -19,7 +19,9 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -209,7 +211,13 @@ describe("orchestrator MCP toolkit", () => {
       latestSummary: queuedFollowupResult,
       cancelQueued: true,
     },
-  ])("reports $label child results", ({ result, latestSummary, cancelQueued }) =>
+    {
+      label: "overlapping held cancellation",
+      result: queuedFollowupResult,
+      latestSummary: queuedFollowupResult,
+      cancelHeld: true,
+    },
+  ])("reports $label child results", ({ result, latestSummary, cancelQueued, cancelHeld }) =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("delegated-task-status");
       const rawTranscript = yield* readDelegatedTaskStatusTranscript(result);
@@ -230,6 +238,9 @@ describe("orchestrator MCP toolkit", () => {
         readonly threadId: ThreadId;
         readonly fields: ReadonlyArray<string>;
       }> = [];
+      const retryHasReadStatus = yield* Deferred.make<void>();
+      const resumeRetry = yield* Deferred.make<void>();
+      let pauseNextCancel = false;
       const layerOrchestration = Layer.merge(
         layerOrchestrator,
         Layer.effect(
@@ -240,6 +251,15 @@ describe("orchestrator MCP toolkit", () => {
               ...service,
               getThreadRecords: (threadId, fields, filter) =>
                 Effect.sync(() => threadRecordReads.push({ threadId, fields })).pipe(
+                  Effect.andThen(
+                    Effect.gen(function* () {
+                      if (pauseNextCancel && threadId === parentThreadId && fields.length === 0) {
+                        pauseNextCancel = false;
+                        yield* Deferred.succeed(retryHasReadStatus, undefined);
+                        yield* Deferred.await(resumeRetry);
+                      }
+                    }),
+                  ),
                   Effect.andThen(service.getThreadRecords(threadId, fields, filter)),
                 ),
             });
@@ -490,6 +510,78 @@ describe("orchestrator MCP toolkit", () => {
           ),
         ).toBe(true);
 
+        if (cancelHeld) {
+          const childThreadId = localChild(delegated.childThreadId);
+          const otherCall = yield* invoke("t3_thread_send", {
+            threadId: childThreadId,
+            message: "Leave this turn held.",
+            mode: "queue",
+            clientRequestId: "delegated-child-unrelated-held",
+          });
+          const other = yield* decodeThreadSendResult(otherCall.structuredContent);
+          const sequence = yield* orchestrator.getThreadEventSequence(childThreadId);
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("hold-queued-delegates"),
+            threadId: childThreadId,
+          });
+          yield* orchestrator
+            .streamStoredEventsFrom({ threadId: childThreadId, afterSequence: sequence })
+            .pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.payload.id === runningFollowup.runId &&
+                  event.payload.status === "interrupted",
+              ),
+              Stream.runHead,
+            );
+          const held = (yield* orchestrator.getThreadProjection(childThreadId)).runs.filter(
+            (run) => run.status === "queued",
+          );
+          expect(held.map((run) => [run.id, run.queueHeld])).toEqual([
+            [queuedFollowup.runId, true],
+            [other.runId, true],
+          ]);
+          const input = { taskId: queuedFollowup.taskId, clientRequestId: "cancel-held-followup" };
+          yield* orchestrator.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("lower-parent-for-queued-cancel"),
+            threadId: parentThreadId,
+            runtimeMode: "approval-required",
+          });
+          const refused = yield* invoke("task_cancel", input);
+          expect(refused.isError).toBe(true);
+          expect(JSON.stringify(refused.content)).toContain("runtime_mode_escalation_denied");
+          expect(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.filter(
+              (run) => run.status === "queued",
+            ),
+          ).toEqual(held);
+          yield* orchestrator.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("restore-parent-for-queued-cancel"),
+            threadId: parentThreadId,
+            runtimeMode: "full-access",
+          });
+          pauseNextCancel = true;
+          const retry = yield* invoke("task_cancel", input).pipe(Effect.forkScoped);
+          yield* Deferred.await(retryHasReadStatus);
+          expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
+          yield* Deferred.succeed(resumeRetry, undefined);
+          expect((yield* Fiber.join(retry)).isError).not.toBe(true);
+          const status = yield* invoke("task_status", { taskId: queuedFollowup.taskId });
+          expect(yield* decodeDelegateTaskResult(status.structuredContent)).toMatchObject({
+            status: "cancelled",
+          });
+          expect(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.filter(
+              (run) => run.status === "queued",
+            ),
+          ).toEqual(held.filter((run) => run.id === other.runId));
+          return;
+        }
+
         if (cancelQueued) {
           const childThreadId = localChild(delegated.childThreadId);
           const running = pendingProjection.runs.find((run) => run.id === runningFollowup.runId);
@@ -557,6 +649,18 @@ describe("orchestrator MCP toolkit", () => {
           ).toMatchObject({
             status: "cancelled",
             cancelledRunId: queuedFollowup.runId,
+            completionDelivery: { state: "disposed" },
+          });
+          expect(
+            (yield* invoke("task_cancel", { ...input, taskId: other.taskId })).isError,
+          ).not.toBe(true);
+          const otherStatus = yield* invoke("task_status", { taskId: other.taskId });
+          expect(yield* decodeDelegateTaskResult(otherStatus.structuredContent)).toMatchObject({
+            status: "cancelled",
+          });
+          const afterOther = yield* orchestrator.getThreadProjection(parentThreadId);
+          expect(afterOther.subagents.find((task) => task.id === other.taskId)).toMatchObject({
+            cancelledRunId: other.runId,
             completionDelivery: { state: "disposed" },
           });
           return;
