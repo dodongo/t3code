@@ -90,6 +90,7 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -6827,6 +6828,83 @@ describe("OrchestratorMcpService live threads", () => {
           .pipe(Effect.withTracer(tracer), Effect.flip);
         assert.equal(current.message, hint.message);
         assert.deepEqual(commands, []);
+      }),
+  );
+
+  it.effect.each(["drifted", "undrifted", "unprofiled"] as const)(
+    "sendToThread: keeps the child's model selection and reports profile drift (%s)",
+    (scenario) =>
+      Effect.gen(function* () {
+        const { advisor, orchestration, otherPi, scope, serverSettings, service, sink, worker } =
+          yield* delegationFixture;
+        const { childThreadId, childRunId } = yield* service.delegateTask(scope, {
+          task: "Review the changes.",
+          ...(scenario === "unprofiled" ? {} : { profile: "advisor" }),
+        });
+        if (childThreadId === null) return yield* Effect.die("Expected a delegated child.");
+        yield* worker.drain();
+        const before = yield* orchestration.getThreadProjection(childThreadId);
+        const run = before.runs.find(({ id }) => id === childRunId)!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("profile-send-complete"),
+              type: "run.updated",
+              threadId: childThreadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        if (scenario !== "undrifted") {
+          const { delegation } = yield* serverSettings.getSettings;
+          yield* serverSettings.updateSettings({
+            delegation: {
+              ...delegation,
+              profiles: {
+                ...delegation.profiles,
+                advisor: {
+                  ...advisor,
+                  providerInstanceId: otherPi,
+                  model: "openai:gpt-6-astra",
+                  options: { thinking: "medium" },
+                },
+              },
+            },
+          });
+        }
+
+        const message = "Review the follow-up.";
+        const sent = yield* service.sendToThread(scope, { threadId: childThreadId, message });
+        const after = yield* orchestration.getThreadProjection(childThreadId);
+        assert.equal(sent.delivery, "started");
+        assert.deepEqual(after.thread.modelSelection, before.thread.modelSelection);
+        assert.sameMembers(
+          after.runs.map(({ id }) => id),
+          [childRunId, sent.runId],
+        );
+        assert.deepEqual(
+          after.runs.find(({ id }) => id === sent.runId)?.modelSelection,
+          before.thread.modelSelection,
+        );
+        assert.equal(after.messages.find(({ id }) => id === sent.messageId)?.text, message);
+
+        const output = OrchestratorToolkit.tools.t3_thread_send.toModelOutput?.(sent) ?? [
+          { type: "text", text: JSON.stringify(sent) },
+        ];
+        assert.deepEqual(
+          output.slice(1),
+          scenario === "drifted"
+            ? [
+                {
+                  type: "text",
+                  text: "This child runs gpt-6-sol (pi, thinking=xhigh); its profile now uses gpt-6-astra (pi_other, thinking=medium). Call delegate_task with profile advisor to switch it.",
+                },
+              ]
+            : [],
+        );
       }),
   );
 
