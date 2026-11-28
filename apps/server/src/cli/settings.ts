@@ -15,27 +15,7 @@ import { expandHomePath } from "../os-jank.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { decodeSettingsFile } from "../serverSettings.ts";
 
-const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1({
-  leafHook: (issue) => {
-    switch (issue._tag) {
-      case "InvalidType":
-        return `Expected ${issue.ast}`;
-      case "InvalidValue":
-        return issue.annotations?.expected
-          ? `Expected ${issue.annotations.expected}`
-          : "Invalid value";
-      case "MissingKey":
-        return "Missing key";
-      case "UnexpectedKey":
-        return "Unexpected key";
-      case "OneOf":
-        return "Expected exactly one schema to match";
-      case "Forbidden":
-        return "Invalid JSON or unsupported value";
-    }
-  },
-  checkHook: (issue) => SchemaIssue.defaultCheckHook(issue) ?? "Invalid value",
-});
+const formatIssue = SchemaIssue.makeFormatterStandardSchemaV1();
 
 const readDiagnosticJson = Schema.decodeUnknownOption(fromLenientJson(Schema.Unknown));
 
