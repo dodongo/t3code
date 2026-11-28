@@ -24,14 +24,46 @@ export function omitMarkdownImages(text: string): string {
       definitions.push(node);
     } else if (node.type === "html" && node.position?.start.offset !== undefined) {
       const start = node.position.start.offset;
-      const authored = text.slice(start, node.position.end.offset);
-      for (const tag of authored.matchAll(tagPattern)) {
+      const end = node.position.end.offset;
+      if (end === undefined) return;
+      const authoredLines = text.slice(start, end).split(/(\r\n|\r|\n)/);
+      const normalizedLines = node.value.split(/(\r\n|\r|\n)/);
+      if (authoredLines.length !== normalizedLines.length) return;
+      const lineOffsets: Array<{ normalized: number; authored: number }> = [];
+      let authoredOffset = start;
+      let normalizedOffset = 0;
+      for (let i = 0; i < authoredLines.length; i += 2) {
+        const authored = authoredLines[i]!;
+        const normalized = normalizedLines[i]!;
+        const prefixLength = authored.length - normalized.length;
+        if (
+          !authored.endsWith(normalized) ||
+          (i === 0 && prefixLength !== 0) ||
+          !/^[> \t]*$/.test(authored.slice(0, prefixLength))
+        )
+          return;
+        lineOffsets.push({ normalized: normalizedOffset, authored: authoredOffset + prefixLength });
+        authoredOffset += authored.length + (authoredLines[i + 1]?.length ?? 0);
+        normalizedOffset += normalized.length + (normalizedLines[i + 1]?.length ?? 0);
+      }
+      let lineIndex = 0;
+      const toAuthored = (offset: number) => {
+        while (
+          lineIndex + 1 < lineOffsets.length &&
+          lineOffsets[lineIndex + 1]!.normalized <= offset
+        ) {
+          lineIndex++;
+        }
+        const line = lineOffsets[lineIndex]!;
+        return line.authored + offset - line.normalized;
+      };
+      for (const tag of node.value.matchAll(tagPattern)) {
         if (tag[2] === undefined) continue;
         htmlTags.push({
           name: tag[2].toLowerCase(),
           closing: tag[1] === "/",
-          start: start + tag.index,
-          end: start + tag.index + tag[0].length,
+          start: toAuthored(tag.index),
+          end: toAuthored(tag.index + tag[0].length),
         });
       }
     } else if ("children" in node) {

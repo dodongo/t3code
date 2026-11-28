@@ -47,6 +47,26 @@ describe(renderInheritedText, () => {
     );
   });
 
+  it("removes multiline HTML image attributes in quotes without consuming surrounding lines", () => {
+    for (const prefix of ["> ", "> > "]) {
+      const quote = (lines: string[]) => lines.map((line) => prefix + line).join("\r\n");
+      expect(
+        renderInheritedText(
+          quote([
+            "<div>",
+            "Before",
+            "<img",
+            '  src="file:///fixture/private.png"',
+            '  alt="synthetic alt"',
+            ">",
+            "After",
+            "</div>",
+          ]),
+        ),
+      ).toBe(quote(["<div>", "Before", "[Image omitted]", "After", "</div>"]));
+    }
+  });
+
   it("preserves trailing prose after an unclosed picture and leaves video sources alone", () => {
     const video = '<video><source src="file:///fixture/video.mp4"></video>';
     const picture =
