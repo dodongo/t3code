@@ -6003,6 +6003,7 @@ describe("OrchestratorMcpService thread lookup", () => {
                 sendToThread: (input) => {
                   inputs.push(input);
                   return Effect.succeed({
+                    projection: idleThreadProjection(target),
                     run: { id: RunId.make("run:sent"), status: "running" },
                     delivery: "started",
                   } as never);
@@ -6416,12 +6417,17 @@ describe("OrchestratorMcpService live threads", () => {
       instanceId: ProviderInstanceId.make("antigravity"),
       driver: ProviderDriverKind.make("antigravity"),
     };
+    const claude = {
+      instanceId: ProviderInstanceId.make("claude-local"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+    };
     const projectId = ProjectId.make("project:mcp-cwd");
     const adapters = ProviderAdapterRegistry.layerFromAdapters([
       liveAdapter(),
       liveAdapter({ instanceId: pi, driver: piDriver }),
       liveAdapter({ instanceId: otherPi, driver: piDriver }),
       liveAdapter(antigravity),
+      liveAdapter(claude),
     ]);
     const database = SqlitePersistence.layerMemory;
     const orchestrationLayer = ProviderReplayHarness.layerWithRegistry(
@@ -6445,6 +6451,7 @@ describe("OrchestratorMcpService live threads", () => {
         [pi]: { driver: "pi", enabled: true },
         [otherPi]: { driver: "pi", enabled: true },
         [antigravity.instanceId]: { driver: "antigravity", enabled: true },
+        [claude.instanceId]: { driver: "claudeAgent", enabled: true },
       },
       delegation: {
         providerByVendor: { openai: pi },
@@ -6502,6 +6509,7 @@ describe("OrchestratorMcpService live threads", () => {
                 { instanceId: pi, driver: piDriver },
                 { instanceId: otherPi, driver: piDriver },
                 antigravity,
+                claude,
               ].map((provider): ServerProvider => ({
                 ...provider,
                 enabled: true,
@@ -6516,6 +6524,7 @@ describe("OrchestratorMcpService live threads", () => {
                   "gpt-6-astra",
                   "gemini-4-neon",
                   "gemini-4-pro",
+                  "claude-test",
                 ].map((slug) => ({
                   slug,
                   name: slug,
@@ -6524,7 +6533,12 @@ describe("OrchestratorMcpService live threads", () => {
                     optionDescriptors: [
                       {
                         type: "select",
-                        id: provider === antigravity ? "thought_level" : "thinking",
+                        id:
+                          provider === antigravity
+                            ? "thought_level"
+                            : provider === claude
+                              ? "effort"
+                              : "thinking",
                         label: "Thinking",
                         role: "reasoning",
                         options: [
@@ -6857,6 +6871,7 @@ describe("OrchestratorMcpService live threads", () => {
     "unprofiled",
     "normalized Antigravity",
     "Antigravity drift",
+    "Pi to Claude drift",
   ] as const)(
     "sendToThread: keeps the child's model selection and reports profile drift (%s)",
     (scenario) =>
@@ -6912,7 +6927,11 @@ describe("OrchestratorMcpService live threads", () => {
             },
           });
         }
-        if (scenario === "drifted" || scenario === "unprofiled") {
+        if (
+          scenario === "drifted" ||
+          scenario === "unprofiled" ||
+          scenario === "Pi to Claude drift"
+        ) {
           const { delegation } = yield* serverSettings.getSettings;
           yield* serverSettings.updateSettings({
             delegation: {
@@ -6921,8 +6940,14 @@ describe("OrchestratorMcpService live threads", () => {
                 ...delegation.profiles,
                 advisor: {
                   ...advisor,
-                  providerInstanceId: otherPi,
-                  model: "openai:gpt-6-astra",
+                  providerInstanceId:
+                    scenario === "Pi to Claude drift"
+                      ? ProviderInstanceId.make("claude-local")
+                      : otherPi,
+                  model:
+                    scenario === "Pi to Claude drift"
+                      ? "anthropic:claude-test"
+                      : "openai:gpt-6-astra",
                   options: { thinking: "medium" },
                 },
               },
@@ -6949,9 +6974,11 @@ describe("OrchestratorMcpService live threads", () => {
           "profileNotice" in sent ? sent.profileNotice : undefined,
           scenario === "drifted"
             ? "This child runs gpt-6-sol (pi, thinking=xhigh); its profile now uses gpt-6-astra (pi_other, thinking=medium). Call delegate_task with profile advisor to switch it."
-            : scenario === "Antigravity drift"
-              ? "This child runs gemini-4-neon (antigravity, thinking=high); its profile now uses gemini-4-pro (antigravity, thinking=high). Call delegate_task with profile antigravity to switch it."
-              : undefined,
+            : scenario === "Pi to Claude drift"
+              ? "This child runs gpt-6-sol (pi, thinking=xhigh); its profile now uses claude-test (claude-local, thinking=medium). Call delegate_task with profile advisor to switch it."
+              : scenario === "Antigravity drift"
+                ? "This child runs gemini-4-neon (antigravity, thinking=high); its profile now uses gemini-4-pro (antigravity, thinking=high). Call delegate_task with profile antigravity to switch it."
+                : undefined,
         );
       }),
   );
