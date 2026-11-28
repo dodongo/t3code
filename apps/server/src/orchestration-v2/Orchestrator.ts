@@ -442,6 +442,7 @@ export interface OrchestratorV2Shape {
     readonly parentThreadId: ThreadId;
     readonly parentRun: Pick<OrchestrationV2Run, "id" | "rootNodeId" | "providerInstanceId">;
     readonly profileName: string;
+    readonly validateSettings: Effect.Effect<void, E>;
     readonly command: Extract<OrchestrationV2Command, { readonly type: "provider.switch" }>;
     readonly configure: (
       child: OrchestrationV2ThreadShell,
@@ -17527,6 +17528,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 (yield* stopReachedRun(command, parentThreadId, run.id))
               )
                 return "parent_stopped";
+              yield* input.validateSettings;
               const child = yield* findThread(command.threadId);
               if (
                 child?.archivedAt !== null ||
