@@ -41,53 +41,75 @@ function pendingFetch(started: Deferred.Deferred<AbortSignal | undefined>) {
 }
 
 describe("AcpMcpStdioBridge", () => {
-  it("prints structured results once in the terminal while retaining other content and errors", async () => {
-    const originalEnvironment = process.env;
-    using _environment = {
-      [Symbol.dispose]: () => {
-        process.env = originalEnvironment;
-      },
-    };
-    process.env = {
-      ...originalEnvironment,
-      T3_ACP_MCP_ENDPOINT: "http://127.0.0.1:1/mcp",
-      T3_ACP_MCP_AUTHORIZATION: "Bearer bridge-test",
-    };
-    const structuredContent = { taskId: "task-1", status: "failed" };
-    const explanation = { type: "text", text: "The command failed." };
-    const image = { type: "image", data: "image-data", mimeType: "image/png" };
-    const result = {
-      structuredContent,
-      content: [{ type: "text", text: JSON.stringify(structuredContent) }, explanation, image],
-      isError: true,
-    };
-    using fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-      if (init?.method === "DELETE") return new Response(null, { status: 204 });
-      const message = JSON.parse(String(init?.body)) as { id?: string; method: string };
-      if (message.method === "notifications/initialized") {
-        return new Response(null, { status: 202 });
-      }
-      return Response.json(
-        {
-          jsonrpc: "2.0",
-          id: message.id,
-          result: message.method === "initialize" ? { protocolVersion: "2025-06-18" } : result,
+  it.each([false, true])(
+    "prints terminal results once, including a send profile notice (%s)",
+    async (send) => {
+      const originalEnvironment = process.env;
+      using _environment = {
+        [Symbol.dispose]: () => {
+          process.env = originalEnvironment;
         },
-        { headers: { "mcp-session-id": "session-42" } },
+      };
+      process.env = {
+        ...originalEnvironment,
+        T3_ACP_MCP_ENDPOINT: "http://127.0.0.1:1/mcp",
+        T3_ACP_MCP_AUTHORIZATION: "Bearer bridge-test",
+      };
+      const delivery = {
+        threadId: "child",
+        messageId: "message-1",
+        runId: "run-1",
+        status: "queued",
+        delivery: "queued",
+      };
+      const notice =
+        "This child runs old; its profile now uses new. Call delegate_task with profile advisor to switch it.";
+      const structuredContent = send
+        ? { ...delivery, profileNotice: notice }
+        : { taskId: "task-1", status: "failed" };
+      const explanation = { type: "text", text: send ? notice : "The command failed." };
+      const image = { type: "image", data: "image-data", mimeType: "image/png" };
+      const result = {
+        structuredContent,
+        content: [
+          { type: "text", text: JSON.stringify(structuredContent) },
+          ...(send ? [] : [explanation, image]),
+        ],
+        isError: !send,
+      };
+      using fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        if (init?.method === "DELETE") return new Response(null, { status: 204 });
+        const message = JSON.parse(String(init?.body)) as { id?: string; method: string };
+        if (message.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        return Response.json(
+          {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: message.method === "initialize" ? { protocolVersion: "2025-06-18" } : result,
+          },
+          { headers: { "mcp-session-id": "session-42" } },
+        );
+      });
+      using output = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+
+      await runAcpMcpCliFastPath(
+        "acp-mcp-call",
+        send
+          ? ["t3_thread_send", '{"threadId":"child","message":"Follow up"}']
+          : ["task_status", '{"taskId":"task-1"}'],
       );
-    });
-    using output = vi.spyOn(process.stdout, "write").mockReturnValue(true);
 
-    await runAcpMcpCliFastPath("acp-mcp-call", ["task_status", '{"taskId":"task-1"}']);
-
-    expect(output).toHaveBeenCalledExactlyOnceWith(
-      `${JSON.stringify({ ...result, content: [explanation, image] })}\n`,
-    );
-    expect(fetch).toHaveBeenLastCalledWith(
-      "http://127.0.0.1:1/mcp",
-      expect.objectContaining({ method: "DELETE" }),
-    );
-  });
+      expect(output).toHaveBeenCalledExactlyOnceWith(
+        `${JSON.stringify({ ...result, content: send ? [] : [explanation, image] })}\n`,
+      );
+      expect(fetch).toHaveBeenLastCalledWith(
+        "http://127.0.0.1:1/mcp",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    },
+  );
 
   it("reads the arguments from stdin when given -", async () => {
     const originalEnvironment = process.env;
