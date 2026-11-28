@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ANTIGRAVITY_PROFILE_THINKING_OPTION } from "../provider/acp/AntigravityAcpSupport.ts";
 
 const driverByVendor = {
   openai: "pi",
@@ -76,11 +77,12 @@ export const resolveDelegationModel = Effect.fn("resolveDelegationModel")(functi
     const { model } = input;
     const { instanceId } = provider;
     if (desired === undefined) return { instanceId, model };
-    if (provider.driver === "antigravity") {
-      const suffix = `-${desired}`;
-      return { instanceId, model: model.endsWith(suffix) ? model : model + suffix };
-    }
-    const id = provider.driver === "pi" ? "thinking" : "effort";
+    const id =
+      provider.driver === "antigravity"
+        ? ANTIGRAVITY_PROFILE_THINKING_OPTION
+        : provider.driver === "pi"
+          ? "thinking"
+          : "effort";
     return { instanceId, model, options: [{ id, value: desired }] };
   }
   const legacy = antigravitySuffixedModel(provider, input.model);
