@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { applyAntigravityAcpModelSelection } from "../provider/acp/AntigravityAcpSupport.ts";
 import { resolveDelegationModel, resolveDelegationRoute } from "./delegationProfiles.ts";
 
 const antigravityId = ProviderInstanceId.make("agy-work");
@@ -74,6 +75,101 @@ describe("resolveDelegationRoute", () => {
 });
 
 describe("resolveDelegationModel", () => {
+  it.effect.each(["gemini-4-neon", "gemini-4-neon-high"])(
+    "sends the native high-thinking model for cold Antigravity selection %s",
+    (model) =>
+      Effect.gen(function* () {
+        const selected = yield* resolveDelegationModel({
+          provider: { ...antigravity, models: [] },
+          model,
+          profile: { ...profile, options: { thinking: "high" } },
+        });
+        assert.deepEqual(selected, { instanceId: antigravityId, model: "gemini-4-neon-high" });
+
+        const configOptions = [
+          {
+            id: "model",
+            name: "Model",
+            type: "select",
+            currentValue: "gemini-default",
+            options: [
+              { value: "gemini-default", name: "Gemini default" },
+              { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            ],
+          },
+        ] as const;
+        const requests: unknown[] = [];
+        const applied = yield* applyAntigravityAcpModelSelection({
+          runtime: {
+            getConfigOptions: Effect.succeed(configOptions),
+            setModel: (value) => Effect.sync(() => void requests.push({ value })),
+            setConfigOption: (id, value, options) =>
+              Effect.sync(() => {
+                requests.push({ id, value, options });
+                return { configOptions };
+              }),
+          },
+          model: selected.model,
+          mapError: (cause) => cause,
+        });
+        assert.equal(applied, "gemini-4-neon");
+        assert.deepEqual(requests, [
+          { id: "model", value: "gemini-4-neon-high", options: { allowUnlistedValue: true } },
+        ]);
+      }),
+  );
+
+  it.effect.each([
+    { driver: "pi", model: "openai/test", option: "thinking" },
+    { driver: "claudeAgent", model: "claude-test", option: "effort" },
+    { driver: "antigravity", model: "gemini-4-neon-high", option: undefined },
+  ] as const)(
+    "keeps the cold $driver selection without adding unspecified thinking",
+    ({ driver, model, option }) =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make(`${driver}-work`);
+        const provider = {
+          ...antigravity,
+          instanceId,
+          driver: ProviderDriverKind.make(driver),
+          models: [],
+        };
+        assert.deepEqual(yield* resolveDelegationModel({ provider, model, profile }), {
+          instanceId,
+          model,
+        });
+        if (option !== undefined) {
+          assert.deepEqual(
+            yield* resolveDelegationModel({
+              provider,
+              model,
+              profile: { ...profile, options: { thinking: "high" } },
+            }),
+            {
+              instanceId,
+              model,
+              options: [{ id: option, value: "high" }],
+            },
+          );
+        }
+      }),
+  );
+
+  it.effect("rejects an unknown model in a populated catalog", () =>
+    Effect.gen(function* () {
+      const error = yield* resolveDelegationModel({
+        provider: antigravity,
+        model: "gemini-unknown",
+        profile,
+      }).pipe(Effect.flip);
+      assert.equal(error.code, "model_unavailable");
+      assert.equal(
+        error.message,
+        "Model gemini-unknown is not advertised by provider agy-work. Use orchestrator_capabilities with search to find models.",
+      );
+    }),
+  );
+
   it.effect.each([
     { title: "advertised alias", model: "gemini-alias", expectedModel: "gemini-alias" },
     {

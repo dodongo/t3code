@@ -71,6 +71,18 @@ export const resolveDelegationModel = Effect.fn("resolveDelegationModel")(functi
   readonly profile: DelegationSettings["profiles"][string];
 }): Effect.fn.Return<ModelSelection, OrchestratorMcpFailure> {
   const { provider, profile } = input;
+  const desired = profile.options?.thinking;
+  if (provider.models.length === 0) {
+    const { model } = input;
+    const { instanceId } = provider;
+    if (desired === undefined) return { instanceId, model };
+    if (provider.driver === "antigravity") {
+      const suffix = `-${desired}`;
+      return { instanceId, model: model.endsWith(suffix) ? model : model + suffix };
+    }
+    const id = provider.driver === "pi" ? "thinking" : "effort";
+    return { instanceId, model, options: [{ id, value: desired }] };
+  }
   const legacy = antigravitySuffixedModel(provider, input.model);
   const model = legacy?.model ?? input.model;
   const advertised = advertisedModel(provider, model);
@@ -80,7 +92,6 @@ export const resolveDelegationModel = Effect.fn("resolveDelegationModel")(functi
       message: `Model ${model} is not advertised by provider ${provider.instanceId}. Use orchestrator_capabilities with search to find models.`,
     });
   }
-  const desired = profile.options?.thinking;
   let thinking = legacy?.thinking;
   if (desired !== undefined) {
     const descriptors = advertised.capabilities?.optionDescriptors;
