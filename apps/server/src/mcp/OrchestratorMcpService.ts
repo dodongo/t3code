@@ -3689,9 +3689,9 @@ const make = Effect.gen(function* () {
             );
           const result = yield* checkPersistentDelegation === undefined
             ? dispatch
-            : persistentDelegationLock.withLock(
-                scope.thread.threadId,
+            : Effect.scoped(
                 Effect.gen(function* () {
+                  yield* restore(persistentDelegationLock.acquireScoped(scope.thread.threadId));
                   const receipt = yield* restore(checkPersistentDelegation);
                   return Option.isSome(receipt) ? receipt.value : yield* dispatch;
                 }),

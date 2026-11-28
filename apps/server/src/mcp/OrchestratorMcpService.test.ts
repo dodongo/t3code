@@ -39,6 +39,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -47,9 +48,11 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -72,6 +75,7 @@ import {
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ServerConfig from "../config.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -6497,6 +6501,7 @@ describe("OrchestratorMcpService live threads", () => {
       const git = yield* GitVcsDriver.GitVcsDriver;
       const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const sink = yield* EventSink.EventSinkV2;
+      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
       const startParent = (parentThreadId: ThreadId) =>
         Effect.gen(function* () {
           yield* orchestration.dispatch({
@@ -6551,6 +6556,7 @@ describe("OrchestratorMcpService live threads", () => {
         scope,
         sessions,
         sink,
+        executor,
         startParent,
       };
     }).pipe(Effect.provide(context));
@@ -6708,6 +6714,59 @@ describe("OrchestratorMcpService live threads", () => {
       assert.notEqual(replacement.success.childThreadId, childThreadId);
       assert.equal(conflict.failure.code, "invalid_request");
       assert.include(conflict.failure.message, reuse(replacement.success.childThreadId));
+    }),
+  );
+
+  it.effect("delegateTask: cancels a persistent waiter before the first dispatch unlocks", () =>
+    Effect.gen(function* () {
+      const { executor, orchestration, service, scope } = yield* delegationFixture;
+      const parentThreadId = scope.thread.threadId;
+      const releaseDispatch = yield* Deferred.make<void>();
+      const dispatchLock = yield* executor
+        .withLock(parentThreadId, Deferred.await(releaseDispatch))
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      let childLookups = 0;
+      let dispatches = 0;
+      const tracer = Tracer.make({
+        span(options) {
+          if (options.name === "ThreadManagementService.listAppOwnedChildThreadIds") childLookups++;
+          if (options.name === "orchestrationV2.threadManagement.ensureCommandTranscripts")
+            dispatches++;
+          return new Tracer.NativeSpan(options);
+        },
+      });
+      const start = (profile: string) =>
+        service
+          .delegateTask(scope, { task: "Review the changes.", profile })
+          .pipe(
+            Effect.withTracer(tracer),
+            Effect.provideService(References.PreventSchedulerYield, true),
+            Effect.forkChild({ startImmediately: true }),
+          );
+      const first = yield* start("advisor");
+      const holderLookups = childLookups;
+      const waiter = yield* start("reviewer");
+      const waiterLookups = childLookups - holderLookups;
+      yield* Effect.sync(() => waiter.interruptUnsafe());
+      const exitWhileLocked = waiter.pollUnsafe();
+
+      yield* Deferred.succeed(releaseDispatch, undefined);
+      yield* Fiber.join(dispatchLock);
+      const firstTask = yield* Fiber.join(first);
+      yield* Fiber.await(waiter);
+
+      assert.equal(holderLookups, 2);
+      assert.equal(waiterLookups, 1);
+      assert.isTrue(
+        exitWhileLocked !== undefined && Exit.hasInterrupts(exitWhileLocked),
+        "The caller must exit before the holder releases its lock.",
+      );
+      assert.equal(dispatches, 1);
+      const parent = yield* orchestration.getThreadProjection(parentThreadId);
+      assert.deepEqual(
+        parent.subagents.map(({ id }) => id),
+        [firstTask.taskId],
+      );
     }),
   );
 
