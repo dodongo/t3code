@@ -166,6 +166,81 @@ describe("Antigravity Auto", () => {
 });
 
 describe("applyAntigravityAcpModelSelection", () => {
+  it.effect(
+    "uses the live thinking selector for the bundled high default with medium requested",
+    () =>
+      Effect.gen(function* () {
+        const { runtime, selections } = makeModelRuntime([
+          {
+            ...modelConfig,
+            options: [
+              ...modelConfig.options,
+              { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+            ],
+          },
+          {
+            id: "thinking_level",
+            name: "Thinking Level",
+            type: "select",
+            category: "thought_level",
+            currentValue: "high",
+            options: [
+              { value: "medium", name: "Medium" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ]);
+        const model = yield* applyAntigravityAcpModelSelection({
+          runtime,
+          model: ANTIGRAVITY_DEFAULT_MODEL,
+          defaultModel: "gemini-3.8-flash-high",
+          profileThinking: "medium",
+          mapError: (cause) => cause,
+        });
+        expect(model).toBe("gemini-3.8-flash");
+        expect(selections).toEqual(["gemini-3.8-flash", "thinking_level=medium"]);
+      }),
+  );
+
+  it.effect.each([
+    { model: ANTIGRAVITY_DEFAULT_MODEL, thinking: "medium", expected: "gemini-3.8-flash-medium" },
+    { model: "gemini-3.8-flash-high", thinking: "high", expected: "gemini-3.8-flash-high" },
+    { model: "gemini-3.8-flash", thinking: "high", expected: "gemini-3.8-flash-high" },
+    { model: "gemini-3.8-flash-medium", thinking: "high", expected: undefined },
+  ])(
+    "resolves $model with $thinking when only runtime 1.5.12 variants are offered",
+    ({ model, thinking, expected }) =>
+      Effect.gen(function* () {
+        const { runtime, selections } = makeModelRuntime([
+          {
+            ...modelConfig,
+            currentValue: "gemini-3.8-flash-low",
+            options: [
+              { value: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+              { value: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
+              { value: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+            ],
+          },
+        ]);
+        const apply = applyAntigravityAcpModelSelection({
+          runtime,
+          model,
+          defaultModel: "gemini-3.8-flash-high",
+          profileThinking: thinking,
+          mapError: (cause) => cause,
+        });
+        if (expected === undefined) {
+          expect(yield* apply.pipe(Effect.flip)).toMatchObject({
+            errorMessage:
+              "Model gemini-3.8-flash-medium specifies thinking medium, which conflicts with profile thinking high.",
+          });
+          expect(selections).toEqual([]);
+        } else {
+          expect(yield* apply).toBe(expected);
+          expect(selections).toEqual([expected]);
+        }
+      }),
+  );
   it.effect("restores the saved model instead of the cold-resume default", () =>
     Effect.gen(function* () {
       const { runtime, selections } = makeModelRuntime();

@@ -427,10 +427,12 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    delegatedFirstMessage?: string,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
+  readonly refreshPersistentChildSelection: Orchestrator.OrchestratorV2Shape["refreshPersistentChildSelection"];
   readonly getThreadHistoryPage: Orchestrator.OrchestratorV2["Service"]["getThreadHistoryPage"];
   readonly getTimelinePage: Orchestrator.OrchestratorV2["Service"]["getTimelinePage"];
   readonly getMessageCount: Orchestrator.OrchestratorV2["Service"]["getMessageCount"];
@@ -845,10 +847,10 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, delegatedFirstMessage) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(orchestrator.dispatch(command, delegatedFirstMessage)),
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
@@ -1924,6 +1926,7 @@ const make = Effect.gen(function* () {
       );
     }),
     dispatch,
+    refreshPersistentChildSelection: orchestrator.refreshPersistentChildSelection,
     getThreadHistoryPage: Effect.fn("ThreadManagementService.getThreadHistoryPage")(
       function (threadId, cursor, throughEntryId, conversationOnly, workMode) {
         return ensureProjectionTranscript(threadId).pipe(

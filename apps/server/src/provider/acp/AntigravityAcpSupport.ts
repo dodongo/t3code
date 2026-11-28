@@ -29,6 +29,7 @@ import {
   type AcpRuntimePolicy,
 } from "@t3tools/provider-acp/server/clientPolicy";
 import type { AcpSessionModeState } from "@t3tools/provider-acp/server/runtimeModel";
+import { flattenSelectChoices } from "@t3tools/provider-acp/server/sessionConfig";
 import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
 import packageJson from "../../../package.json" with { type: "json" };
 import { normalizeAntigravitySessionUpdate } from "./AntigravityProtocol.ts";
@@ -247,21 +248,34 @@ function legacyAntigravityFamily(
     .toSorted((left, right) => right.length - left.length)[0];
 }
 
+const legacyThinkingSuffix = /-(low|medium|high)$/;
+
 function resolveAntigravityModel(input: {
   readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
   readonly model: string | null | undefined;
   readonly defaultModel?: string | undefined;
+  readonly profileThinking?: string | undefined;
 }): string | undefined {
   const modelConfig = input.configOptions.find((option) => option.id === "model");
   const current = modelConfig?.type === "select" ? modelConfig.currentValue : undefined;
   if (input.model && input.model !== ANTIGRAVITY_DEFAULT_MODEL) return input.model;
   const options = antigravityModelOptions(input.configOptions);
+  const defaultVariant =
+    input.profileThinking !== undefined &&
+    input.defaultModel !== undefined &&
+    legacyThinkingSuffix.test(input.defaultModel)
+      ? input.defaultModel.replace(legacyThinkingSuffix, `-${input.profileThinking}`)
+      : undefined;
   return input.defaultModel &&
-    (options.some((option) => option.value === input.defaultModel) ||
+    (options.some(
+      (option) => option.value === input.defaultModel || option.value === defaultVariant,
+    ) ||
       legacyAntigravityFamily(input.configOptions, input.defaultModel) !== undefined)
     ? input.defaultModel
     : current;
 }
+
+export const ANTIGRAVITY_PROFILE_THINKING_OPTION = "t3:antigravity-profile-thinking";
 
 /** Never replace a saved selection with the default returned by a cold resume. */
 export const applyAntigravityAcpModelSelection = Effect.fn("applyAntigravityAcpModelSelection")(
@@ -272,6 +286,7 @@ export const applyAntigravityAcpModelSelection = Effect.fn("applyAntigravityAcpM
     >;
     readonly model: string | null | undefined;
     readonly defaultModel?: string | undefined;
+    readonly profileThinking?: string | undefined;
     readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
   }): Effect.fn.Return<string | undefined, E> {
     const configOptions = yield* input.runtime.getConfigOptions;
@@ -281,30 +296,85 @@ export const applyAntigravityAcpModelSelection = Effect.fn("applyAntigravityAcpM
       configOptions,
       model: input.model,
       defaultModel: input.defaultModel,
+      profileThinking: input.profileThinking,
     });
+    const desired = input.profileThinking;
     const explicit = Boolean(input.model) && input.model !== ANTIGRAVITY_DEFAULT_MODEL;
-    if (resolved === undefined || (!explicit && resolved === current)) return current;
-    const options = antigravityModelOptions(configOptions);
-    const legacyFamily = options.some((option) => option.value === resolved)
-      ? undefined
-      : legacyAntigravityFamily(configOptions, resolved);
-    if (legacyFamily !== undefined) {
+    if (desired === undefined && (resolved === undefined || (!explicit && resolved === current))) {
+      return current;
+    }
+    const invalid = (message: string) =>
+      input.mapError(EffectAcpErrors.AcpRequestError.invalidParams(message));
+    const offered = new Set(antigravityModelOptions(configOptions).map((option) => option.value));
+    const legacyFamily =
+      resolved === undefined || offered.has(resolved)
+        ? undefined
+        : legacyAntigravityFamily(configOptions, resolved);
+    let model = resolved;
+    let encodedThinking = false;
+    if (desired === undefined && resolved !== undefined && legacyFamily !== undefined) {
       yield* input.runtime
         .setConfigOption("model", resolved, { allowUnlistedValue: true })
         .pipe(Effect.mapError(input.mapError));
       return legacyFamily;
     }
-    if (!options.some((option) => option.value === resolved)) {
-      return yield* Effect.fail(
-        input.mapError(
-          EffectAcpErrors.AcpRequestError.invalidParams(
-            `Antigravity model '${resolved}' is unavailable for this Google account. Select an available model.`,
+    if (desired !== undefined && resolved !== undefined) {
+      const suffix = legacyThinkingSuffix.exec(resolved);
+      const variantFamily = suffix ? resolved.slice(0, suffix.index) : resolved;
+      const variant =
+        !explicit || offered.has(resolved) || offered.has(`${variantFamily}-${desired}`)
+          ? suffix
+          : null;
+      const family = legacyFamily ?? (variant ? variantFamily : resolved);
+      const embedded =
+        variant?.[1] ??
+        (legacyFamily === undefined ? undefined : resolved.slice(legacyFamily.length + 1));
+      if (explicit && embedded !== undefined && embedded !== desired) {
+        return yield* Effect.fail(
+          invalid(
+            `Model ${resolved} specifies thinking ${embedded}, which conflicts with profile thinking ${desired}.`,
           ),
+        );
+      }
+      const desiredVariant = `${family}-${desired}`;
+      if (explicit && variant !== null && offered.has(resolved)) {
+        encodedThinking = true;
+      } else if (offered.has(family)) {
+        model = family;
+      } else if (offered.has(desiredVariant)) {
+        model = desiredVariant;
+        encodedThinking = true;
+      } else if (embedded !== undefined) {
+        return yield* Effect.fail(
+          invalid(`Antigravity model '${family}' does not advertise thinking ${desired}.`),
+        );
+      }
+    }
+    if (model === undefined || !offered.has(model)) {
+      return yield* Effect.fail(
+        invalid(
+          `Antigravity model '${model ?? "default"}' is unavailable for this Google account. Select an available model.`,
         ),
       );
     }
-    yield* input.runtime.setModel(resolved).pipe(Effect.mapError(input.mapError));
-    return resolved;
+    if (explicit || model !== current) {
+      yield* input.runtime.setModel(model).pipe(Effect.mapError(input.mapError));
+    }
+    if (desired !== undefined && !encodedThinking) {
+      const thinking = antigravityThinkingConfig(yield* input.runtime.getConfigOptions);
+      if (
+        thinking === undefined ||
+        !flattenSelectChoices(thinking.options).some((choice) => choice.value === desired)
+      ) {
+        return yield* Effect.fail(
+          invalid(`Antigravity model '${model}' does not advertise thinking ${desired}.`),
+        );
+      }
+      yield* input.runtime
+        .setConfigOption(thinking.id, desired)
+        .pipe(Effect.mapError(input.mapError));
+    }
+    return model;
   },
 );
 

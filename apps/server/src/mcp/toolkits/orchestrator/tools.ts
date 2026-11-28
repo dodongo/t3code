@@ -90,7 +90,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No history. Run `orchestrator_capabilities` first. `profile` sets model, thinking, checkout and skills; override only `target.model` as `vendor:model`. Without a profile, prefer native subagents for the same settings and checkout. `cwd` picks a local folder. Never switch unavailable targets. Keep `taskId` for `task_status` and `task_cancel`. Follow `next`; don't poll. No secrets in `task`.",
+    "Start one child agent with `task` and, if the local profile opts in, caller history as background. Use `orchestrator_capabilities` first. `profile` sets model, thinking, checkout and skills; override only `target.model` as `vendor:model`. Without a profile, prefer native subagents for the same setup. `cwd` sets the folder. Never reroute targets. Save `taskId` for status or cancel. Follow `next`; don't poll. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,

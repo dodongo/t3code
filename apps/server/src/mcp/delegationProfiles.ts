@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ANTIGRAVITY_PROFILE_THINKING_OPTION } from "../provider/acp/AntigravityAcpSupport.ts";
 
 const driverByVendor = {
   openai: "pi",
@@ -71,6 +72,19 @@ export const resolveDelegationModel = Effect.fn("resolveDelegationModel")(functi
   readonly profile: DelegationSettings["profiles"][string];
 }): Effect.fn.Return<ModelSelection, OrchestratorMcpFailure> {
   const { provider, profile } = input;
+  const desired = profile.options?.thinking;
+  if (provider.models.length === 0) {
+    const { model } = input;
+    const { instanceId } = provider;
+    if (desired === undefined) return { instanceId, model };
+    const id =
+      provider.driver === "antigravity"
+        ? ANTIGRAVITY_PROFILE_THINKING_OPTION
+        : provider.driver === "pi"
+          ? "thinking"
+          : "effort";
+    return { instanceId, model, options: [{ id, value: desired }] };
+  }
   const legacy = antigravitySuffixedModel(provider, input.model);
   const model = legacy?.model ?? input.model;
   const advertised = advertisedModel(provider, model);
@@ -80,7 +94,6 @@ export const resolveDelegationModel = Effect.fn("resolveDelegationModel")(functi
       message: `Model ${model} is not advertised by provider ${provider.instanceId}. Use orchestrator_capabilities with search to find models.`,
     });
   }
-  const desired = profile.options?.thinking;
   let thinking = legacy?.thinking;
   if (desired !== undefined) {
     const descriptors = advertised.capabilities?.optionDescriptors;

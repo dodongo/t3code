@@ -615,6 +615,10 @@
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
     },
+    "./markdownImageRedaction": {
+      "types": "./src/markdownImageRedaction.ts",
+      "import": "./src/markdownImageRedaction.ts"
+    },
     "./markdownMath": {
       "types": "./src/markdownMath.ts",
       "import": "./src/markdownMath.ts"

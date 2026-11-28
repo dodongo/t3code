@@ -4,14 +4,14 @@ import { keepOrderedListNumbers, keepsOrderedListNumbers } from "./markdownOrder
 interface MarkdownPosition {
   readonly start?: {
     readonly line?: number;
-    readonly offset?: number;
+    readonly offset?: number | undefined;
   };
 }
 
 interface MarkdownAstNode {
   readonly type: string;
   readonly value?: unknown;
-  readonly position?: MarkdownPosition;
+  readonly position?: MarkdownPosition | undefined;
   children?: MarkdownAstNode[];
 }
 
@@ -28,9 +28,9 @@ interface RecoveredMarkdown {
   readonly source: string;
 }
 
-const INLINE_PARSE_PREFIX = "t3-markdown-inline-prefix:";
+export const INLINE_PARSE_PREFIX = "t3-markdown-inline-prefix:";
 
-function isSameLineOverIndentedCode(
+export function isSameLineOverIndentedCode(
   node: MarkdownAstNode,
   parent: MarkdownAstNode | undefined,
   markdown: string,
