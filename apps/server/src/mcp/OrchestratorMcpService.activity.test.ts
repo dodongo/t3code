@@ -1073,8 +1073,9 @@ it("readThread and sendToThread reach threads in other projects", async () => {
                     threadId: input.threadId,
                   }),
                 ),
-          sendToThread: () =>
+          sendToThread: ({ threadId }) =>
             Effect.succeed({
+              projection: foreignProjection(threadId),
               run: { id: "run-foreign", status: "queued" },
               delivery: "started",
             } as unknown as ThreadManagementService.ThreadManagementSendResult),
