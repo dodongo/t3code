@@ -130,7 +130,6 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
-import { ANTIGRAVITY_PROFILE_THINKING_OPTION } from "../provider/acp/AntigravityAcpSupport.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -4705,17 +4704,16 @@ const make = Effect.gen(function* () {
                 profile.providerInstanceId,
               );
               if (route.instanceId === null) return;
-              const oldThinking = modelSelection.options?.find(
-                ({ id }) =>
-                  id === "thinking" ||
-                  id === "effort" ||
-                  id === ANTIGRAVITY_PROFILE_THINKING_OPTION,
-              )?.value;
+              const thinkingId = route.driver === "pi" ? "thinking" : "effort";
+              const oldThinking =
+                route.driver === "antigravity"
+                  ? undefined
+                  : modelSelection.options?.find(({ id }) => id === thinkingId)?.value;
               const newThinking = profile.options?.thinking;
               if (
                 route.instanceId === modelSelection.instanceId &&
-                route.model === modelSelection.model &&
-                oldThinking === newThinking
+                (route.driver === "antigravity" ||
+                  (route.model === modelSelection.model && oldThinking === newThinking))
               )
                 return;
               const old = `${modelSelection.model} (${modelSelection.instanceId}${oldThinking === undefined ? "" : `, thinking=${oldThinking}`})`;
