@@ -15737,26 +15737,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId,
           finalizeDelegatedCompletionDelivery(threadId, run.id),
         );
-        yield* threadDispatch
-          .withLock(
-            threadId,
-            (run.status === "completed"
-              ? releaseUnattendedHolds(threadId, run.id)
-              : Effect.void
-            ).pipe(
-              Effect.andThen(
-                startNextQueuedRun(threadId, {
-                  endedRunId: run.id,
-                  ...(run.status === "failed" ? { failedRunId: run.id } : {}),
-                }),
+        const taskCancellation =
+          run.status === "cancelled" &&
+          run.startedAt === null &&
+          run.delegatedTaskId !== undefined &&
+          stored.commandId !== null &&
+          Option.isSome(
+            yield* eventSink.readByCommandId({ commandId: stored.commandId }).pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "subagent.updated" &&
+                  event.payload.id === run.delegatedTaskId &&
+                  event.payload.cancelledRunId === run.id,
               ),
-            ),
-          )
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
+              Stream.runHead,
             ),
           );
+        if (!taskCancellation)
+          yield* threadDispatch
+            .withLock(
+              threadId,
+              (run.status === "completed"
+                ? releaseUnattendedHolds(threadId, run.id)
+                : Effect.void
+              ).pipe(
+                Effect.andThen(
+                  startNextQueuedRun(threadId, {
+                    endedRunId: run.id,
+                    ...(run.status === "failed" ? { failedRunId: run.id } : {}),
+                  }),
+                ),
+              ),
+            )
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
+              ),
+            );
       }
       const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
       if (parentThreadId !== undefined) {
