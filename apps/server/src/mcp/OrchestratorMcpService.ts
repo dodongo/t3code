@@ -3519,50 +3519,56 @@ const make = Effect.gen(function* () {
                         failure("orchestration_error", "Unable to read server settings."),
                       ),
                     );
-                    let latest = yield* readSettings;
-                    let selection: ModelSelection;
-                    while (true) {
-                      const latestProfileName =
-                        (yield* selectDelegationProfileName(
-                          latest.delegation,
-                          callerProfileName,
-                          input.profile,
-                        )) ?? callerProfileName;
-                      const profile =
-                        latestProfileName === undefined
-                          ? undefined
-                          : latest.delegation.profiles[latestProfileName];
-                      if (latestProfileName !== childProfileName || profile?.persistent !== true) {
-                        return yield* failure(
-                          "invalid_request",
-                          "The persistent delegation profile changed. Retry with the current profile.",
-                        );
-                      }
-                      const { modelSelection } = yield* resolveProfile({
-                        route: yield* resolveDelegationRoute(
-                          latest.delegation.providerByVendor,
-                          profile.model,
-                          profile.providerInstanceId,
-                        ),
-                        profile,
-                        providers: yield* loadProviders,
-                        adapters: yield* loadOrchestrationCapableInstanceIds(),
-                        settings: latest,
-                        projectId: thread.projectId,
-                        refresh: { cwd: yield* parentWorkspaceCwd({ thread }) },
-                      });
-                      const after = yield* readSettings;
-                      if (delegationSettingsEqual(latest.delegation, after.delegation)) {
-                        selection = modelSelection;
-                        break;
-                      }
-                      latest = after;
+                    const latest = yield* readSettings;
+                    const latestProfileName =
+                      (yield* selectDelegationProfileName(
+                        latest.delegation,
+                        callerProfileName,
+                        input.profile,
+                      )) ?? callerProfileName;
+                    const profile =
+                      latestProfileName === undefined
+                        ? undefined
+                        : latest.delegation.profiles[latestProfileName];
+                    if (latestProfileName !== childProfileName || profile?.persistent !== true) {
+                      return yield* failure(
+                        "invalid_request",
+                        "The persistent delegation profile changed. Retry with the current profile.",
+                      );
                     }
+                    const { modelSelection: selection } = yield* resolveProfile({
+                      route: yield* resolveDelegationRoute(
+                        latest.delegation.providerByVendor,
+                        profile.model,
+                        profile.providerInstanceId,
+                      ),
+                      profile,
+                      providers: yield* loadProviders,
+                      adapters: yield* loadOrchestrationCapableInstanceIds(),
+                      settings: latest,
+                      projectId: thread.projectId,
+                      refresh: { cwd: yield* parentWorkspaceCwd({ thread }) },
+                    });
                     const outcome = yield* threadManagement
                       .refreshPersistentChildSelection({
                         parentThreadId: scope.thread.threadId,
                         parentRun,
                         profileName: childProfileName,
+                        validateSettings: readSettings.pipe(
+                          Effect.flatMap((current) =>
+                            delegationSettingsEqual(latest.delegation, current.delegation) &&
+                            resolveProjectProviderInstanceEnabled(
+                              current,
+                              thread.projectId,
+                              selection.instanceId,
+                            )
+                              ? Effect.void
+                              : failure(
+                                  "invalid_request",
+                                  "The delegation settings changed. Retry with the current profile.",
+                                ),
+                          ),
+                        ),
                         command: {
                           type: "provider.switch",
                           commandId: stableCommandId({
