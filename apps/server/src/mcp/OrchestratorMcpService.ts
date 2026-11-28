@@ -4718,8 +4718,8 @@ const make = Effect.gen(function* () {
                 oldThinking === newThinking
               )
                 return;
-              const old = `${modelSelection.instanceId}/${modelSelection.model}${oldThinking === undefined ? "" : ` (${oldThinking})`}`;
-              const next = `${route.instanceId}/${route.model}${newThinking === undefined ? "" : ` (${newThinking})`}`;
+              const old = `${modelSelection.model} (${modelSelection.instanceId}${oldThinking === undefined ? "" : `, thinking=${oldThinking}`})`;
+              const next = `${route.model} (${route.instanceId}${newThinking === undefined ? "" : `, thinking=${newThinking}`})`;
               return `This child runs ${old}; its profile now uses ${next}. Call delegate_task with profile ${delegationProfile} to switch it.`;
             }).pipe(Effect.orElseSucceed(() => undefined));
       return {
