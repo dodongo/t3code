@@ -9,7 +9,36 @@ import {
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
 import { describe, expect, it } from "vite-plus/test";
-import { buildDelegatedFirstMessage } from "./delegatedContext.ts";
+import { buildDelegatedFirstMessage, renderInheritedText } from "./delegatedContext.ts";
+
+describe(renderInheritedText, () => {
+  it("omits inline and reference images without changing ordinary Markdown", () => {
+    expect(
+      renderInheritedText(
+        'Keep [link](https://example.test). ![nested [label]](<file:///synthetic/a (b).png> "hidden title") ![reference label][private-id]\n\n[private-id]: data:image/png;base64,c3ludGhldGlj',
+      ),
+    ).toBe("Keep [link](https://example.test). [Image omitted] [Image omitted]\n\n");
+  });
+
+  it("omits image data from decoded citation text and comments", () => {
+    const quote = "Quoted ![private alt](data:image/png;base64,c3ludGhldGlj)";
+    const text = renderInheritedText(
+      serializeAssistantCitation({
+        version: 1,
+        environmentId: EnvironmentId.make("env"),
+        threadId: ThreadId.make("thread"),
+        messageId: MessageId.make("assistant"),
+        text: quote,
+        start: 0,
+        end: quote.length,
+        prefix: "",
+        suffix: "",
+        comment: "Before ![hidden](file:///synthetic/comment.jpg) after",
+      }),
+    );
+    expect(text).toBe("Quoted [Image omitted]\nComment: Before [Image omitted] after");
+  });
+});
 
 describe(buildDelegatedFirstMessage, () => {
   it("returns the exact task when no context is available", () => {
