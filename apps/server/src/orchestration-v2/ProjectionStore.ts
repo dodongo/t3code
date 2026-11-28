@@ -392,6 +392,7 @@ export interface ProjectionRecordFilter {
   readonly delegatedTaskMessagesOnly?: true;
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
+  readonly followupReportAfterHandoff?: NodeId;
   readonly messageRunIds?: ReadonlyArray<RunId>;
   readonly turnItemRunIds?: ReadonlyArray<RunId | null>;
   readonly turnItemNodeIds?: ReadonlyArray<NodeId>;
@@ -3842,6 +3843,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               `;
     });
 
+    const reportAfterHandoff = (
+      threadId: ThreadId,
+      taskId: NodeId | undefined,
+      eventType: "message.updated" | "turn-item.updated",
+      idColumn: "message_id" | "turn_item_id",
+    ) =>
+      taskId === undefined
+        ? sql``
+        : sql`AND ${sql.literal(idColumn)} IN (
+      SELECT json_extract(event.payload_json, '$.id') FROM orchestration_events AS event
+      WHERE event.aggregate_kind = 'thread' AND event.stream_id = ${threadId}
+        AND event.event_type = ${eventType}
+        AND event.sequence > (SELECT MAX(handoff_sequence) FROM orchestration_v2_followup_ownership
+          WHERE owner_task_id = ${taskId})
+    )`;
+
     const turnItemMatch = (threadId: ThreadId, filter: ProjectionRecordFilter | undefined) => sql`
       ${threadColumn(filter?.turnItemNodeIds)} = ${threadId}
         ${filter?.turnItemRequestIds === undefined ? sql`` : sql`AND json_extract(payload_json, '$.requestId') IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRequestIds)}))`}
@@ -3849,6 +3866,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
         ${filter?.turnItemRunId === undefined ? sql`` : sql`AND run_id = ${filter.turnItemRunId}`}
         ${filter?.turnItemNodeIds === undefined ? sql`` : sql`AND node_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemNodeIds)}))`}
+        ${reportAfterHandoff(threadId, filter?.followupReportAfterHandoff, "turn-item.updated", "turn_item_id")}
         ${filter?.turnItemRunIds === undefined ? sql`` : sql`AND (run_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRunIds.filter((id): id is RunId => id !== null))})) OR (${filter.turnItemRunIds.includes(null) ? 1 : 0} = 1 AND run_id IS NULL))`}
     `;
 
@@ -4584,6 +4602,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
                   ${filter?.monitorNotificationsOnly === true ? sql`AND json_extract(payload_json, '$.notification.source.kind') = 'monitor'` : sql``}
                   ${filter?.delegatedTaskMessagesOnly === true ? sql`AND ${sql.literal(DELEGATED_TASK_MESSAGE_CONDITION)}` : sql``}
+                  ${reportAfterHandoff(threadId, filter?.followupReportAfterHandoff, "message.updated", "message_id")}
                   ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
                 ORDER BY created_at ASC, message_id ASC
               `
@@ -6729,8 +6748,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${floor === undefined ? sql`` : sql`AND (completed_at IS NULL OR completed_at >= ${floorCompletedAt})`}`
             ).pipe(Effect.flatMap(decodeRows(decodeRunPayload, threadId)));
             const runs = new Map([...window, ...rest].map((run) => [run.id, run]));
-            const requested = new Set<RunId>();
+            const requestedWakes = new Set<RunId>();
+            const checkedSources = new Set<RunId>();
             for (;;) {
+              const sourceIds = [...runs.keys()].filter((id) => !checkedSources.has(id));
+              if (sourceIds.length === 0) break;
+              for (const id of sourceIds) checkedSources.add(id);
+              if (floor !== undefined && taskIds.length > 0) {
+                const continuations = yield* sql<PayloadRow>`
+                  SELECT payload_json FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${threadId} AND json_valid(payload_json)
+                    AND json_extract(payload_json, '$.delegatedTaskId') IS NULL
+                    AND json_extract(payload_json, '$.restartContinuationOfRunId')
+                      IN (SELECT value FROM json_each(${encodeIdList(sourceIds)}))
+                `.pipe(Effect.flatMap(decodeRows(decodeRunPayload, threadId)));
+                for (const run of continuations) runs.set(run.id, run);
+              }
               const wakeRunIds = [
                 ...new Set(
                   records.messages.flatMap((message) =>
@@ -6738,14 +6771,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     message.delegatedCompletion !== undefined &&
                     runs.has(message.delegatedCompletion.parentRunId) &&
                     !runs.has(message.runId) &&
-                    !requested.has(message.runId)
+                    !requestedWakes.has(message.runId)
                       ? [message.runId]
                       : [],
                   ),
                 ),
               ];
-              if (wakeRunIds.length === 0) break;
-              for (const id of wakeRunIds) requested.add(id);
+              if (wakeRunIds.length === 0) continue;
+              for (const id of wakeRunIds) requestedWakes.add(id);
               const wakes = yield* getThreadRecords(threadId, ["runs"], { runIds: wakeRunIds });
               for (const run of wakes.runs) runs.set(run.id, run);
             }

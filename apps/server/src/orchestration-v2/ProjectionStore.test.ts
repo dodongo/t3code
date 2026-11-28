@@ -1492,7 +1492,10 @@ it.effect("reads a delegated child's recent, unfinished and task runs without it
       // Unstarted cancelled runs are outside the window's index: one ends after the floor.
       [4, { ...unstartedCancel, completedAt: at(20) }],
       [5, { ...unstartedCancel, completedAt: at(1) }],
-      ...[2, 6, 7, 8, 9, 10, 11, 12].map((ordinal) => [ordinal, {}] as const),
+      [6, { delegatedTaskId: undefined, restartContinuationOfRunId: id(2) }],
+      [7, { delegatedTaskId: undefined, restartContinuationOfRunId: id(6) }],
+      [8, { delegatedTaskId: undefined, restartContinuationOfRunId: id(5) }],
+      ...[2, 9, 10, 11, 12].map((ordinal) => [ordinal, {}] as const),
     ] as const) {
       yield* store.apply({
         id: EventId.make(`event:delegated-child-runs:${ordinal}`),
@@ -1517,7 +1520,7 @@ it.effect("reads a delegated child's recent, unfinished and task runs without it
     assert.equal(bounded.runsFloor?.id, id(11));
     assert.deepEqual(
       bounded.runs.map((run) => run.id),
-      [2, 3, 4, 11, 12].map(id),
+      [2, 3, 4, 6, 7, 11, 12].map(id),
     );
     const whole = yield* store.getDelegatedChildControls(threadId, { taskIds, windowSize: 100 });
     assert.isUndefined(whole.runsFloor);

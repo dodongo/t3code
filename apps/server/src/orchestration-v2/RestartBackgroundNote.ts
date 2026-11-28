@@ -300,7 +300,7 @@ export function cancelledBeforeStart(
   return run.status === "cancelled" && neverStarted(run);
 }
 
-/** A follow-up task's runs: those tagged with it, and the untagged wakes for subagents they started. */
+/** A follow-up's tagged runs and their untagged wakes and restart continuations. */
 export function delegatedTaskRuns(
   projection: {
     readonly runs: ReadonlyArray<OrchestrationV2Run>;
@@ -316,20 +316,23 @@ export function delegatedTaskRuns(
   const untagged = new Set(
     projection.runs.filter((run) => run.delegatedTaskId === undefined).map((run) => run.id),
   );
-  for (let grew = owned.size > 0; grew;) {
-    grew = false;
-    for (const { runId, delegatedCompletion } of projection.messages) {
-      if (
-        runId === null ||
-        !untagged.has(runId) ||
-        owned.has(runId) ||
-        delegatedCompletion === undefined ||
-        !owned.has(delegatedCompletion.parentRunId)
-      )
-        continue;
-      owned.add(runId);
-      grew = true;
-    }
+  const successors = new Map<OrchestrationV2Run["id"], Array<OrchestrationV2Run["id"]>>();
+  for (const { runId, delegatedCompletion } of projection.messages) {
+    if (runId === null || !untagged.has(runId) || delegatedCompletion === undefined) continue;
+    const source = delegatedCompletion.parentRunId;
+    const next = successors.get(source) ?? [];
+    next.push(runId);
+    successors.set(source, next);
+  }
+  for (const run of projection.runs) {
+    const source = run.restartContinuationOfRunId;
+    if (source === undefined || !untagged.has(run.id)) continue;
+    const next = successors.get(source) ?? [];
+    next.push(run.id);
+    successors.set(source, next);
+  }
+  for (const id of owned) {
+    for (const next of successors.get(id) ?? []) owned.add(next);
   }
   return projection.runs.filter((run) => owned.has(run.id));
 }

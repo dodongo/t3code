@@ -487,9 +487,12 @@ const layerBase: Layer.Layer<
     });
 
     const updateFollowupOwnership = Effect.fnUntraced(function* (
-      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      stored: ReadonlyArray<OrchestrationV2StoredEvent>,
       ownerTaskId?: NodeId,
     ) {
+      const handoffSequence = stored.at(-1)?.sequence;
+      if (handoffSequence === undefined) return;
+      const events = stored.map(({ event }) => event);
       const tasks = events.flatMap((event) =>
         event.type === "subagent.updated" ? [event.payload] : [],
       );
@@ -516,11 +519,11 @@ const layerBase: Layer.Layer<
           task.completionDelivery?.state === "disposed"
         ) {
           yield* sql`INSERT OR IGNORE INTO orchestration_v2_followup_ownership
-            (owner_task_id, source_task_id)
-            SELECT ${owner.id}, source_task_id FROM orchestration_v2_followup_ownership
+            (owner_task_id, source_task_id, handoff_sequence)
+            SELECT ${owner.id}, source_task_id, ${handoffSequence} FROM orchestration_v2_followup_ownership
             WHERE owner_task_id = ${task.id}`;
           yield* sql`INSERT OR IGNORE INTO orchestration_v2_followup_ownership
-            (owner_task_id, source_task_id) VALUES (${owner.id}, ${task.id})`;
+            (owner_task_id, source_task_id, handoff_sequence) VALUES (${owner.id}, ${task.id}, ${handoffSequence})`;
         }
         yield* sql`DELETE FROM orchestration_v2_followup_ownership WHERE owner_task_id = ${task.id}`;
       }
@@ -569,7 +572,7 @@ const layerBase: Layer.Layer<
             events: normalized,
           });
           const outcomes = yield* applyStoredEvents(committed);
-          yield* updateFollowupOwnership(normalized, input.followupOwnerTaskId);
+          yield* updateFollowupOwnership(committed, input.followupOwnerTaskId);
           yield* effectOutbox.enqueue(input.effects);
           return { committed, outcomes };
         }).pipe(Effect.withTracerEnabled(false)),
@@ -901,7 +904,7 @@ const layerBase: Layer.Layer<
             );
           }
           const outcomes = yield* applyStoredEvents(storedEvents);
-          yield* updateFollowupOwnership(normalized);
+          yield* updateFollowupOwnership(storedEvents);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,

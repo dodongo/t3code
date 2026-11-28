@@ -6,6 +6,7 @@ export default Effect.gen(function* () {
   yield* sql`CREATE TABLE orchestration_v2_followup_ownership (
     owner_task_id TEXT NOT NULL,
     source_task_id TEXT NOT NULL,
+    handoff_sequence INTEGER NOT NULL,
     PRIMARY KEY (owner_task_id, source_task_id)
   ) WITHOUT ROWID`;
 });

@@ -2977,8 +2977,16 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
         };
       });
 
-    it.effect.each(["single", "superseded", "legacy", "cancel inherited"])(
-      "awaits a grandchild wake (%s)",
+    it.effect.each([
+      "single",
+      "superseded",
+      "legacy",
+      "cancel inherited",
+      "restarted wake",
+      "early wake",
+      "historical report",
+    ])(
+      "holds the current follow-up until owned grandchild work returns a report (%s)",
       (scenario) =>
         Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -3148,6 +3156,91 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             );
           }
 
+          const preHandoffWake = scenario === "early wake" || scenario === "historical report";
+          const wakeRunId = RunId.make(`run:followup-grandchild-wake-${scenario}`);
+          const wakeRun = (status: "running" | "completed") =>
+            runEvent({
+              threadId: child.childThreadId,
+              runId: wakeRunId,
+              ordinal: followupRun.ordinal + 3,
+              status,
+              now,
+            });
+          const startWake = eventSink.write({
+            commandId: reconcileCommandId(`followup-grandchild-settled-${scenario}`),
+            events: [
+              {
+                id: EventId.make(`event:followup-grandchild-completed-${scenario}`),
+                type: "subagent.updated",
+                threadId: child.childThreadId,
+                runId: followupRun.id,
+                nodeId: grandchildId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: {
+                  ...grandchild,
+                  status: "completed",
+                  result: "grandchild finished",
+                  completionDelivery: { state: "acknowledged", observedByRunId: wakeRunId },
+                  completedAt: now,
+                },
+              },
+              {
+                id: EventId.make(`event:followup-grandchild-wake-message-${scenario}`),
+                type: "message.updated",
+                threadId: child.childThreadId,
+                runId: wakeRunId,
+                occurredAt: now,
+                payload: {
+                  id: MessageId.make(`message:${wakeRunId}`),
+                  threadId: child.childThreadId,
+                  runId: wakeRunId,
+                  nodeId: null,
+                  role: "user",
+                  text: "Delegated task finished.",
+                  attachments: [],
+                  streaming: false,
+                  createdBy: "agent",
+                  creationSource: "server",
+                  delegatedCompletion: {
+                    parentRunId: followupRun.id,
+                    generation: 1,
+                    taskIds: [grandchildId],
+                  },
+                  createdAt: now,
+                  updatedAt: now,
+                },
+              },
+              ...(scenario === "historical report"
+                ? [
+                    {
+                      id: EventId.make("event:historical-inherited-report"),
+                      type: "message.updated" as const,
+                      threadId: child.childThreadId,
+                      runId: wakeRunId,
+                      occurredAt: now,
+                      payload: {
+                        id: MessageId.make("message:historical-inherited-report"),
+                        threadId: child.childThreadId,
+                        runId: wakeRunId,
+                        nodeId: null,
+                        role: "assistant" as const,
+                        text: "Historical report must not be borrowed.",
+                        attachments: [],
+                        streaming: false,
+                        createdBy: "agent" as const,
+                        creationSource: "server" as const,
+                        createdAt: now,
+                        updatedAt: now,
+                      },
+                    },
+                  ]
+                : []),
+              wakeRun("running"),
+            ],
+          });
+          if (preHandoffWake) yield* startWake;
           let currentTaskId = followupTaskId;
           if (scenario !== "single") {
             const messageId = MessageId.make(`message:followup-grandchild-newer-${scenario}`);
@@ -3198,6 +3291,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               yield* orchestrator.recoverDelegatedTasks;
             }
             currentTaskId = newer.delegatedTaskId!;
+            if (preHandoffWake) assert.isAbove(newer.ordinal, wakeRun("running").payload.ordinal);
             const handover = yield* orchestrator.getThreadProjection(parentThreadId);
             assert.deepEqual(
               handover.subagents.filter((task) => task.result === null).map((task) => task.id),
@@ -3270,64 +3364,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           }
 
           // The grandchild's completion wakes the child in a run without a delegatedTaskId.
-          const wakeRunId = RunId.make(`run:followup-grandchild-wake-${scenario}`);
-          const wakeRun = (status: "running" | "completed") =>
-            runEvent({
-              threadId: child.childThreadId,
-              runId: wakeRunId,
-              ordinal: followupRun.ordinal + 3,
-              status,
-              now,
-            });
-          yield* eventSink.write({
-            commandId: reconcileCommandId(`followup-grandchild-settled-${scenario}`),
-            events: [
-              {
-                id: EventId.make(`event:followup-grandchild-completed-${scenario}`),
-                type: "subagent.updated",
-                threadId: child.childThreadId,
-                runId: followupRun.id,
-                nodeId: grandchildId,
-                driver,
-                providerInstanceId: modelSelection.instanceId,
-                occurredAt: now,
-                payload: {
-                  ...grandchild,
-                  status: "completed",
-                  result: "grandchild finished",
-                  completionDelivery: { state: "acknowledged", observedByRunId: wakeRunId },
-                  completedAt: now,
-                },
-              },
-              {
-                id: EventId.make(`event:followup-grandchild-wake-message-${scenario}`),
-                type: "message.updated",
-                threadId: child.childThreadId,
-                runId: wakeRunId,
-                occurredAt: now,
-                payload: {
-                  id: MessageId.make(`message:${wakeRunId}`),
-                  threadId: child.childThreadId,
-                  runId: wakeRunId,
-                  nodeId: null,
-                  role: "user",
-                  text: "Delegated task finished.",
-                  attachments: [],
-                  streaming: false,
-                  createdBy: "agent",
-                  creationSource: "server",
-                  delegatedCompletion: {
-                    parentRunId: followupRun.id,
-                    generation: 1,
-                    taskIds: [grandchildId],
-                  },
-                  createdAt: now,
-                  updatedAt: now,
-                },
-              },
-              wakeRun("running"),
-            ],
-          });
+          if (!preHandoffWake) yield* startWake;
           yield* orchestrator.recoverDelegatedTasks;
           const waking = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
             (task) => task.id === currentTaskId,
@@ -3337,31 +3374,90 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             "the follow-up closed before the child's wake ended",
           );
 
+          let reportRun: OrchestrationV2Run = wakeRun("completed").payload;
+          if (scenario === "restarted wake") {
+            yield* eventSink.write({
+              commandId: reconcileCommandId("cut-inherited-wake"),
+              events: [
+                {
+                  ...wakeRun("completed"),
+                  id: EventId.make("event:cut-inherited-wake"),
+                  payload: { ...wakeRun("completed").payload, status: "cancelled" },
+                },
+              ],
+            });
+            const messageId = MessageId.make("message:resume-inherited-wake");
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "server",
+              commandId: CommandId.make("command:resume-inherited-wake"),
+              threadId: child.childThreadId,
+              restartContinuationOfRunId: wakeRunId,
+              messageId,
+              text: "Continue after restart.",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+            const continued = (yield* orchestrator.getThreadProjection(
+              child.childThreadId,
+            )).runs.find((run) => run.userMessageId === messageId)!;
+            assert.equal(continued.restartContinuationOfRunId, wakeRunId);
+            assert.isUndefined(continued.delegatedTaskId);
+            yield* eventSink.write({
+              commandId: reconcileCommandId("inherited-wake-resumed"),
+              events: [
+                {
+                  ...wakeRun("running"),
+                  id: EventId.make("event:inherited-wake-resumed"),
+                  runId: continued.id,
+                  payload: { ...continued, status: "running", startedAt: now, completedAt: null },
+                },
+              ],
+            });
+            yield* orchestrator.recoverDelegatedTasks;
+            const pending = yield* orchestrator.getThreadProjection(parentThreadId);
+            assert.deepEqual(
+              pending.subagents.filter((task) => task.result === null).map((task) => task.id),
+              [currentTaskId],
+            );
+            assert.notInclude(
+              pending.runs.find((run) => run.id === parentRunId)?.delegatedCompletion?.delivery
+                ?.taskIds ?? [],
+              currentTaskId,
+            );
+            reportRun = { ...continued, status: "completed", startedAt: now, completedAt: now };
+          }
+
           yield* eventSink.write({
             commandId: reconcileCommandId(`followup-grandchild-wake-finished-${scenario}`),
             events: [
-              {
-                id: EventId.make(`event:followup-grandchild-wake-result-${scenario}`),
-                type: "message.updated",
-                threadId: child.childThreadId,
-                runId: wakeRunId,
-                occurredAt: now,
-                payload: {
-                  id: MessageId.make(`message:followup-grandchild-wake-result-${scenario}`),
-                  threadId: child.childThreadId,
-                  runId: wakeRunId,
-                  nodeId: null,
-                  role: "assistant",
-                  text: "The grandchild finished the next step.",
-                  attachments: [],
-                  streaming: false,
-                  createdBy: "agent",
-                  creationSource: "server",
-                  createdAt: now,
-                  updatedAt: now,
-                },
-              },
-              wakeRun("completed"),
+              ...(scenario === "historical report"
+                ? []
+                : [
+                    {
+                      id: EventId.make(`event:followup-grandchild-wake-result-${scenario}`),
+                      type: "message.updated" as const,
+                      threadId: child.childThreadId,
+                      runId: reportRun.id,
+                      occurredAt: now,
+                      payload: {
+                        id: MessageId.make(`message:followup-grandchild-wake-result-${scenario}`),
+                        threadId: child.childThreadId,
+                        runId: reportRun.id,
+                        nodeId: null,
+                        role: "assistant" as const,
+                        text: "The grandchild finished the next step.",
+                        attachments: [],
+                        streaming: false,
+                        createdBy: "agent" as const,
+                        creationSource: "server" as const,
+                        createdAt: now,
+                        updatedAt: now,
+                      },
+                    },
+                  ]),
+              { ...wakeRun("completed"), runId: reportRun.id, payload: reportRun },
             ],
           });
           yield* orchestrator.recoverDelegatedTasks;
@@ -3369,7 +3465,11 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             (task) => task.id === currentTaskId,
           );
           assert.equal(settled?.status, "completed");
-          assert.equal(settled?.result, "The grandchild finished the next step.");
+          if (scenario === "historical report") {
+            assert.notInclude(settled?.result ?? "", "Historical report must not be borrowed.");
+          } else {
+            assert.equal(settled?.result, "The grandchild finished the next step.");
+          }
           const final = yield* orchestrator.getThreadProjection(parentThreadId);
           let wake = yield* notifications.take;
           while (
@@ -3409,7 +3509,11 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           );
           assert.lengthOf(wakeMessages, 1);
           const wakeMessage = wakeMessages[0];
-          assert.include(wakeMessage?.text ?? "", "The grandchild finished the next step.");
+          if (scenario === "historical report") {
+            assert.notInclude(wakeMessage?.text ?? "", "Historical report must not be borrowed.");
+          } else {
+            assert.include(wakeMessage?.text ?? "", "The grandchild finished the next step.");
+          }
         }),
     );
 

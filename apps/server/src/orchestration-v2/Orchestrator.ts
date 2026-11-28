@@ -15764,11 +15764,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         result.turnItemId === null
       ) {
         const inheritedWakes = inheritedRuns
-          .filter(
-            (run) =>
-              run.delegatedTaskId === undefined &&
-              run.ordinal > Math.min(...taskRuns.map((run) => run.ordinal)),
-          )
+          .filter((run) => run.delegatedTaskId === undefined)
           .toSorted((a, b) => b.ordinal - a.ordinal);
         if (inheritedWakes.length > 0) {
           const ids = inheritedWakes.map((run) => run.id);
@@ -15776,6 +15772,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             childThreadId,
             ["messages", "turnItems"],
             {
+              followupReportAfterHandoff: task.id,
               messageRoles: ["assistant"],
               messageRunIds: ids,
               turnItemRunIds: ids,
