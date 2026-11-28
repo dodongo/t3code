@@ -203,7 +203,13 @@ describe("orchestrator MCP toolkit", () => {
     { label: "identical", result: delegatedResult, latestSummary: null },
     { label: "emoji", result: "😀", latestSummary: "😀" },
     { label: "long", result: longFollowupResult, latestSummary: longFollowupResult },
-  ])("reports $label child results", ({ result, latestSummary }) =>
+    {
+      label: "queued cancellation",
+      result: queuedFollowupResult,
+      latestSummary: queuedFollowupResult,
+      cancelQueued: true,
+    },
+  ])("reports $label child results", ({ result, latestSummary, cancelQueued }) =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("delegated-task-status");
       const rawTranscript = yield* readDelegatedTaskStatusTranscript(result);
@@ -483,6 +489,71 @@ describe("orchestrator MCP toolkit", () => {
             (run) => run.status === "running",
           ),
         ).toBe(true);
+
+        if (cancelQueued) {
+          const childThreadId = localChild(delegated.childThreadId);
+          const running = pendingProjection.runs.find((run) => run.id === runningFollowup.runId);
+          if (!running?.rootNodeId) return yield* Effect.die("Missing running sibling node.");
+          yield* orchestrator.dispatch({
+            type: "delegated_task.remote.request",
+            commandId: CommandId.make("command:mcp-replay-sibling-descendant"),
+            parentThreadId: childThreadId,
+            parentRunId: running.id,
+            parentNodeId: running.rootNodeId,
+            task: "Keep working in a linked environment.",
+            driver: ProviderDriverKind.make("codex"),
+            modelSelection: codexSelection,
+            remoteChild: {
+              environmentId: EnvironmentId.make("environment:mcp-replay-descendant"),
+              threadId: ThreadId.make("thread:mcp-replay-descendant"),
+              label: "Sibling descendant",
+            },
+          });
+          const otherCall = yield* invoke("t3_thread_send", {
+            threadId: childThreadId,
+            message: "Keep this unrelated turn in the queue.",
+            mode: "queue",
+            clientRequestId: "delegated-child-unrelated-queue",
+          });
+          const other = yield* decodeThreadSendResult(otherCall.structuredContent);
+          const parentBefore = yield* orchestrator.getThreadProjection(parentThreadId);
+          const childBefore = yield* orchestrator.getThreadProjection(childThreadId);
+          expect(childBefore.subagents).toHaveLength(1);
+          const input = {
+            taskId: queuedFollowup.taskId,
+            clientRequestId: "cancel-queued-followup",
+          };
+          expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
+          const statusCall = yield* invoke("task_status", { taskId: queuedFollowup.taskId });
+          const status = yield* decodeDelegateTaskResult(statusCall.structuredContent);
+          expect(status).toMatchObject({ status: "cancelled", workState: "result_available" });
+          expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
+
+          const childAfter = yield* orchestrator.getThreadProjection(childThreadId);
+          expect(childAfter.runs.find((run) => run.id === running.id)).toEqual(running);
+          expect(childAfter.runs.find((run) => run.id === other.runId)?.status).toBe("queued");
+          expect(childAfter.runs.find((run) => run.id === queuedFollowup.runId)?.status).toBe(
+            "cancelled",
+          );
+          expect(childAfter.subagents).toEqual(childBefore.subagents);
+          expect(childAfter.providerTurns).toEqual(childBefore.providerTurns);
+          const parentAfter = yield* orchestrator.getThreadProjection(parentThreadId);
+          expect(parentAfter.runs).toEqual(parentBefore.runs);
+          expect(parentAfter.messages).toEqual(parentBefore.messages);
+          const unrelatedTasks = (task: { readonly id: string }) =>
+            task.id !== queuedFollowup.taskId;
+          expect(parentAfter.subagents.filter(unrelatedTasks)).toEqual(
+            parentBefore.subagents.filter(unrelatedTasks),
+          );
+          expect(
+            parentAfter.subagents.find((task) => task.id === queuedFollowup.taskId),
+          ).toMatchObject({
+            status: "cancelled",
+            cancelledRunId: queuedFollowup.runId,
+            completionDelivery: { state: "disposed" },
+          });
+          return;
+        }
 
         const pendingStatusCall = yield* invoke("task_status", {
           taskId: delegated.taskId,

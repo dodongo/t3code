@@ -2842,7 +2842,6 @@ const make = Effect.gen(function* () {
           yield* assertStoppable(childThreadId);
         }
       });
-      yield* assertStoppable(childThreadId);
       const parentTask = (yield* loadTasks(scope.thread.threadId, [input.taskId])).find(
         (task) => task.id === input.taskId && task.origin === "app_owned",
       );
@@ -2885,19 +2884,25 @@ const make = Effect.gen(function* () {
             taskId: input.taskId,
             command,
             stopDescendants: (remoteDispatch) =>
-              threadManagement.stopDelegatedTasks({
-                threadId: childThreadId,
-                commandId,
-                reason,
-                remoteDispatch,
-              }),
+              assertStoppable(childThreadId).pipe(
+                Effect.andThen(
+                  threadManagement.stopDelegatedTasks({
+                    threadId: childThreadId,
+                    commandId,
+                    reason,
+                    remoteDispatch,
+                  }),
+                ),
+              ),
           })
           .pipe(
             Effect.mapError((error) =>
-              failure(
-                "task_not_cancellable",
-                `Unable to stop delegated task ${input.taskId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-              ),
+              error._tag === "OrchestratorMcpFailure"
+                ? error
+                : failure(
+                    "task_not_cancellable",
+                    `Unable to stop delegated task ${input.taskId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                  ),
             ),
           );
         const stopped = yield* threadManagement
@@ -2925,8 +2930,7 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(threadManagementFailure));
         }
       });
-      // Checked above; a user raising one of these threads meanwhile is
-      // caught again under that thread's lock, which leaves it running.
+      // Recheck modes under each thread's lock after preflight.
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
       const stopWithinLimit = stopChild.pipe(
         Effect.provideService(DispatchModeLimit, {

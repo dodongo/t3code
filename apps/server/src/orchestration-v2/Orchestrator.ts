@@ -16119,63 +16119,111 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (candidate) =>
             candidate.id === input.taskId &&
             candidate.origin === "app_owned" &&
-            candidate.childThreadId === command.threadId &&
-            isOrchestrationV2WorkActive(candidate.status),
+            candidate.childThreadId === command.threadId,
         );
-        const child = yield* projectionStore
-          .getThreadRecords(
-            command.threadId,
-            ["runs", "messages", "subagents", "providerThreads"],
-            { messageRoles: ["user"] },
-          )
-          .pipe(mapDispatchError(command));
-        const followUpRun = child.runs
-          .filter((run) => run.delegatedTaskId === input.taskId)
-          .toSorted((a, b) => b.ordinal - a.ordinal)[0];
-        const unsettled =
-          followUpRun === undefined
-            ? child.thread.forkedFrom?.type === "node" &&
-              child.thread.forkedFrom.nodeId === input.taskId &&
-              progressAfterTurn(child).state !== "result_available"
-            : delegatedTaskTerminalStatus(runOutcome(followUpRun)) === null ||
-              delegatedTaskAwaitsWork(delegatedTaskRuns(child, input.taskId), child);
-        yield* threadDispatch.withLock(
+        const readChild = () =>
+          projectionStore
+            .getThreadRecords(
+              command.threadId,
+              ["runs", "messages", "subagents", "providerThreads"],
+              { messageRoles: ["user"] },
+            )
+            .pipe(mapDispatchError(command));
+        const queuedCancellation = yield* threadDispatch.withLock(
           command.threadId,
           Effect.gen(function* () {
+            const receipt = yield* commandReceipts
+              .getByCommandId(command.commandId)
+              .pipe(mapDispatchError(command));
+            if (Option.isSome(receipt) && receipt.value.commandType === "queued-run.cancel") {
+              yield* replayCommandReceipt(command, receipt.value);
+              return { task };
+            }
+            const child = yield* readChild();
+            const taskRuns = delegatedTaskRuns(child, input.taskId);
+            const [onlyRun] = taskRuns;
+            if (
+              Option.isNone(receipt) &&
+              task !== undefined &&
+              (isOrchestrationV2WorkActive(task.status) || task.status === "idle") &&
+              taskRuns.length === 1 &&
+              onlyRun?.status === "queued" &&
+              onlyRun.startedAt === null
+            ) {
+              const cancelledTask = {
+                ...task,
+                cancelledRunId: onlyRun.id,
+                updatedAt: yield* DateTime.now,
+              };
+              yield* dispatchWithReceiptEffect(
+                {
+                  type: "queued-run.cancel",
+                  commandId: command.commandId,
+                  threadId: command.threadId,
+                  runId: onlyRun.id,
+                },
+                [],
+                cancelledTask,
+              );
+              return { task: cancelledTask };
+            }
+            const previousFollowUp = taskRuns
+              .filter((run) => run.delegatedTaskId === input.taskId)
+              .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+            const unsettled =
+              previousFollowUp === undefined
+                ? child.thread.forkedFrom?.type === "node" &&
+                  child.thread.forkedFrom.nodeId === input.taskId &&
+                  progressAfterTurn(child).state !== "result_available"
+                : delegatedTaskTerminalStatus(runOutcome(previousFollowUp)) === null ||
+                  delegatedTaskAwaitsWork(taskRuns, child);
             // Hold intake closed until descendants stop and this thread's Stop commits.
             yield* input.stopDescendants((command) =>
               commandThreadId(command) === input.command.threadId
                 ? dispatchWithReceiptEffect(command)
                 : dispatchWithReceipt(command),
             );
-            const child = yield* projectionStore
-              .getThreadRecords(
-                command.threadId,
-                ["runs", "messages", "subagents", "providerThreads"],
-                { messageRoles: ["user"] },
-              )
-              .pipe(mapDispatchError(command));
-            const followUpRun = child.runs
+            const stoppedChild = yield* readChild();
+            const followUpRun = stoppedChild.runs
               .filter((run) => run.delegatedTaskId === input.taskId)
               .toSorted((a, b) => b.ordinal - a.ordinal)[0];
             const monitorRunIds = new Set(
-              child.messages
+              stoppedChild.messages
                 .filter((message) => message.notification?.source.kind === "monitor")
                 .map((message) => message.runId),
             );
-            const activeRun = child.runs
+            const activeRun = stoppedChild.runs
               .filter((run) => isLiveRun(run) && !monitorRunIds.has(run.id))
               .toSorted((a, b) => b.ordinal - a.ordinal)[0];
-            const cancelledRun = followUpRun ?? activeRun ?? progressAfterTurn(child).resultRun;
+            const cancelledRun =
+              followUpRun ?? activeRun ?? progressAfterTurn(stoppedChild).resultRun;
             const now = yield* DateTime.now;
             const cancelledTask =
-              task !== undefined && unsettled && cancelledRun !== undefined
+              task !== undefined &&
+              isOrchestrationV2WorkActive(task.status) &&
+              unsettled &&
+              cancelledRun !== undefined
                 ? { ...task, cancelledRunId: cancelledRun.id, updatedAt: now }
                 : undefined;
             // The marker, Stop receipt and interrupt outbox commit together under both locks.
             yield* dispatchWithReceiptEffect(command, [], cancelledTask);
           }),
         );
+        if (queuedCancellation !== undefined) {
+          if (queuedCancellation.task?.result === null) {
+            const child = yield* projectionStore
+              .getThreadRecords(
+                command.threadId,
+                ["runs", "messages", "subagents", "providerThreads", "providerTurns", "attempts"],
+                { messageRoles: ["user"] },
+              )
+              .pipe(mapDispatchError(command));
+            yield* finalizeAppOwnedSubagentTask(child, {
+              task: queuedCancellation.task,
+            }).pipe(mapDispatchError(command));
+          }
+          return;
+        }
         yield* finalizeAppOwnedSubagent(command.threadId).pipe(mapDispatchError(command));
       }),
     );
