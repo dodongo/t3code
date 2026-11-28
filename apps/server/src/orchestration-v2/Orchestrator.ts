@@ -438,6 +438,16 @@ export interface OrchestratorV2Shape {
     command: OrchestrationV2ServerCommand,
     delegatedFirstMessage?: string,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
+  readonly refreshPersistentChildSelection: <E>(input: {
+    readonly parentThreadId: ThreadId;
+    readonly parentRun: Pick<OrchestrationV2Run, "id" | "rootNodeId" | "providerInstanceId">;
+    readonly profileName: string;
+    readonly command: Extract<OrchestrationV2Command, { readonly type: "provider.switch" }>;
+    readonly configure: (
+      child: OrchestrationV2ThreadShell,
+      dispatch: Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
+    ) => Effect.Effect<void, E>;
+  }) => Effect.Effect<"gone" | "reusable" | "parent_stopped", OrchestratorV2Error | E>;
   readonly replayDelegatedTask: (input: {
     readonly commandId: CommandId;
     readonly parentThreadId: ThreadId;
@@ -17493,6 +17503,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return effectOutbox.awaitSettled(`effect:restart-continuation:${run.id}`).pipe(Effect.ignore);
     }),
     dispatch: dispatchWithReceipt,
+    refreshPersistentChildSelection: Effect.fn("OrchestratorV2.refreshPersistentChildSelection")(
+      (input) => {
+        const { parentThreadId, parentRun, command } = input;
+        if (parentThreadId === command.threadId || parentRun.rootNodeId === null)
+          return Effect.succeed("parent_stopped");
+        const parentNodeId = parentRun.rootNodeId;
+        return threadDispatch.withLock(
+          parentThreadId,
+          threadDispatch.withLock(
+            command.threadId,
+            Effect.gen(function* () {
+              const parent = yield* findThread(parentThreadId);
+              if (parent?.archivedAt !== null || parent.deletedAt !== null) return "parent_stopped";
+              const { runs } = yield* projectionStore
+                .getRunProviderRecords(parentThreadId, parentRun.id, parentNodeId)
+                .pipe(mapDispatchError(command));
+              const run = runs.find(({ id }) => id === parentRun.id);
+              if (
+                run === undefined ||
+                run.providerInstanceId !== parentRun.providerInstanceId ||
+                !(isActiveRun(run) || (yield* backgroundSubagentOutlivesRun(run))) ||
+                (yield* stopReachedRun(command, parentThreadId, run.id))
+              )
+                return "parent_stopped";
+              const child = yield* findThread(command.threadId);
+              if (
+                child?.archivedAt !== null ||
+                child.deletedAt !== null ||
+                child.delegationProfile !== input.profileName
+              )
+                return "gone";
+              if (!modelSelectionsEqual(child.modelSelection, command.modelSelection)) {
+                const shell = yield* projectionStore
+                  .getThreadShell(child.id)
+                  .pipe(mapDispatchError(command));
+                if (shell === null) return "gone";
+                yield* input.configure(shell, dispatchWithReceiptEffect(command));
+              }
+              return "reusable";
+            }),
+          ),
+        );
+      },
+    ),
     replayDelegatedTask: Effect.fn("OrchestratorV2.replayDelegatedTask")(function* ({
       commandId,
       parentThreadId,

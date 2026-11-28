@@ -1,6 +1,6 @@
 import {
   CommandId,
-  type DelegationSettings,
+  DelegationSettings,
   type RunId,
   idleCompactionOf,
   type ServerSettings as Settings,
@@ -72,11 +72,7 @@ import {
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import {
-  getProviderOptionCurrentValue,
-  modelSelectionsEqual,
-  withLegacyUltracodeEffort,
-} from "@t3tools/shared/model";
+import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -312,6 +308,51 @@ export const isThreadManagementError = Schema.is(ThreadManagementService.ThreadM
 const encodeThreadSendInput = Schema.encodeEffect(
   Schema.fromJsonString(OrchestratorMcpThreadSendInput),
 );
+
+const isMcpFailure = Schema.is(OrchestratorMcpFailure);
+const delegationSettingsEqual = Schema.toEquivalence(DelegationSettings);
+
+const selectDelegationProfileName = Effect.fnUntraced(function* (
+  delegation: DelegationSettings,
+  callerProfileName: string | undefined,
+  requestedProfile: string | undefined,
+) {
+  const mainProfiles =
+    delegation.mainProfiles !== undefined && callerProfileName === undefined
+      ? delegation.mainProfiles
+      : undefined;
+  const allowedProfiles =
+    callerProfileName === undefined
+      ? undefined
+      : delegation.profiles[callerProfileName]?.allowedProfiles;
+
+  const profileName =
+    mainProfiles === undefined && allowedProfiles === undefined
+      ? requestedProfile
+      : (requestedProfile ?? mainProfiles?.[0] ?? allowedProfiles?.[0]);
+
+  if (
+    mainProfiles !== undefined &&
+    (profileName === undefined || !mainProfiles.includes(profileName))
+  ) {
+    return yield* failure(
+      "invalid_request",
+      `A main thread delegates only with the profiles ${mainProfiles.join(", ")}; omit profile to use ${mainProfiles[0]}.`,
+    );
+  }
+  if (
+    allowedProfiles !== undefined &&
+    (profileName === undefined || !allowedProfiles.includes(profileName))
+  ) {
+    return yield* failure(
+      "invalid_request",
+      allowedProfiles.length === 0
+        ? `A thread with profile ${callerProfileName} may not delegate tasks.`
+        : `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
+    );
+  }
+  return profileName;
+});
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -3349,40 +3390,14 @@ const make = Effect.gen(function* () {
       const callerThread = (yield* loadCallerRecords(scope.thread.threadId, [])).thread;
       const callerProfileName = callerThread.delegationProfile;
       const callerProfile =
-        callerProfileName !== undefined
-          ? settings.delegation.profiles[callerProfileName]
-          : undefined;
-      const mainProfiles =
-        settings.delegation.mainProfiles !== undefined && callerProfileName === undefined
-          ? settings.delegation.mainProfiles
-          : undefined;
-      const allowedProfiles = callerProfile?.allowedProfiles;
-
-      const profileName =
-        mainProfiles === undefined && allowedProfiles === undefined
-          ? input.profile
-          : (input.profile ?? mainProfiles?.[0] ?? allowedProfiles?.[0]);
-
-      if (
-        mainProfiles !== undefined &&
-        (profileName === undefined || !mainProfiles.includes(profileName))
-      ) {
-        return yield* failure(
-          "invalid_request",
-          `A main thread delegates only with the profiles ${mainProfiles.join(", ")}; omit profile to use ${mainProfiles[0]}.`,
-        );
-      }
-      if (
-        allowedProfiles !== undefined &&
-        (profileName === undefined || !allowedProfiles.includes(profileName))
-      ) {
-        return yield* failure(
-          "invalid_request",
-          allowedProfiles.length === 0
-            ? `A thread with profile ${callerProfileName} may not delegate tasks.`
-            : `A thread with profile ${callerProfileName} delegates only with the profiles ${allowedProfiles.join(", ")}; omit profile to use ${allowedProfiles[0]}.`,
-        );
-      }
+        callerProfileName === undefined
+          ? undefined
+          : settings.delegation.profiles[callerProfileName];
+      const profileName = yield* selectDelegationProfileName(
+        settings.delegation,
+        callerProfileName,
+        input.profile,
+      );
       const replay =
         input.clientRequestId === undefined
           ? Effect.succeedNone
@@ -3499,46 +3514,56 @@ const make = Effect.gen(function* () {
                   const refresh = Effect.gen(function* () {
                     const receipt = yield* replay;
                     if (Option.isSome(receipt)) return receipt;
-                    const { modelSelection } = yield* resolveProfile({
-                      route: yield* resolveDelegationRoute(
-                        settings.delegation.providerByVendor,
-                        childProfile.model,
-                        childProfile.providerInstanceId,
+                    const readSettings = serverSettings.getSettings.pipe(
+                      Effect.mapError(() =>
+                        failure("orchestration_error", "Unable to read server settings."),
                       ),
-                      profile: childProfile,
-                      providers: yield* loadProviders,
-                      adapters: yield* loadOrchestrationCapableInstanceIds(),
-                      settings,
-                      projectId: thread.projectId,
-                      refresh: { cwd: yield* parentWorkspaceCwd({ thread }) },
-                    });
-                    const current = yield* threadManagement
-                      .getThreadShell(childThreadId)
-                      .pipe(Effect.mapError(threadManagementFailure));
-                    if (current?.archivedAt !== null || current.deletedAt !== null)
-                      return Option.none();
-                    if (!modelSelectionsEqual(current.modelSelection, modelSelection)) {
-                      const caller = yield* loadConfigurationCaller().pipe(
-                        Effect.provideService(McpInvocationContext, scope),
-                        Effect.provideService(
-                          ThreadManagementService.ThreadManagementService,
-                          threadManagement,
+                    );
+                    let latest = yield* readSettings;
+                    let selection: ModelSelection;
+                    while (true) {
+                      const latestProfileName =
+                        (yield* selectDelegationProfileName(
+                          latest.delegation,
+                          callerProfileName,
+                          input.profile,
+                        )) ?? callerProfileName;
+                      const profile =
+                        latestProfileName === undefined
+                          ? undefined
+                          : latest.delegation.profiles[latestProfileName];
+                      if (latestProfileName !== childProfileName || profile?.persistent !== true) {
+                        return yield* failure(
+                          "invalid_request",
+                          "The persistent delegation profile changed. Retry with the current profile.",
+                        );
+                      }
+                      const { modelSelection } = yield* resolveProfile({
+                        route: yield* resolveDelegationRoute(
+                          latest.delegation.providerByVendor,
+                          profile.model,
+                          profile.providerInstanceId,
                         ),
-                      );
-                      const { limits } = caller;
-                      yield* assertTargetWithinLimits(limits, current);
-                      yield* assertSameLink(caller, current);
-                      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-                      yield* requireSkillDenyListSupport(
-                        providerAdapters,
-                        modelSelection.instanceId,
-                        {
-                          deniedSkills: thread.deniedSkills,
-                          delegationProfile: childProfileName,
-                        },
-                      ).pipe(Effect.mapError((error) => failure("invalid_request", error.message)));
-                      yield* threadManagement
-                        .dispatch({
+                        profile,
+                        providers: yield* loadProviders,
+                        adapters: yield* loadOrchestrationCapableInstanceIds(),
+                        settings: latest,
+                        projectId: thread.projectId,
+                        refresh: { cwd: yield* parentWorkspaceCwd({ thread }) },
+                      });
+                      const after = yield* readSettings;
+                      if (delegationSettingsEqual(latest.delegation, after.delegation)) {
+                        selection = modelSelection;
+                        break;
+                      }
+                      latest = after;
+                    }
+                    const outcome = yield* threadManagement
+                      .refreshPersistentChildSelection({
+                        parentThreadId: scope.thread.threadId,
+                        parentRun,
+                        profileName: childProfileName,
+                        command: {
                           type: "provider.switch",
                           commandId: stableCommandId({
                             scope,
@@ -3546,31 +3571,73 @@ const make = Effect.gen(function* () {
                             operation: "refresh-persistent-child-selection",
                           }),
                           threadId: childThreadId,
-                          modelSelection,
-                        })
-                        .pipe(
-                          Effect.provideService(DispatchModeLimit, { ...limits, refused }),
-                          Effect.catch((error) =>
-                            Effect.flatMap(Ref.get(refused), (refusal) =>
-                              Effect.fail(
-                                refusal === undefined
-                                  ? threadManagementFailure(error)
-                                  : failure(
-                                      refusal.mode === "runtime"
-                                        ? "runtime_mode_escalation_denied"
-                                        : "interaction_mode_escalation_denied",
-                                      `Thread ${refusal.threadId} runs in ${refusal.runtimeMode}/${refusal.interactionMode}, above this caller's limit.`,
-                                    ),
+                          modelSelection: selection,
+                        },
+                        configure: Effect.fn("OrchestratorMcpService.configurePersistentChild")(
+                          function* (current, dispatch) {
+                            const caller = yield* loadConfigurationCaller().pipe(
+                              Effect.provideService(McpInvocationContext, scope),
+                              Effect.provideService(
+                                ThreadManagementService.ThreadManagementService,
+                                threadManagement,
                               ),
-                            ),
-                          ),
-                        );
+                            );
+                            const { limits } = caller;
+                            yield* assertTargetWithinLimits(limits, current);
+                            yield* assertSameLink(caller, current);
+                            const refused = yield* Ref.make<DispatchModeRefusal | undefined>(
+                              undefined,
+                            );
+                            yield* requireSkillDenyListSupport(
+                              providerAdapters,
+                              selection.instanceId,
+                              {
+                                deniedSkills: thread.deniedSkills,
+                                delegationProfile: childProfileName,
+                              },
+                            ).pipe(
+                              Effect.mapError((error) => failure("invalid_request", error.message)),
+                            );
+                            yield* dispatch.pipe(
+                              Effect.provideService(DispatchModeLimit, { ...limits, refused }),
+                              Effect.catch((error) =>
+                                Effect.flatMap(Ref.get(refused), (refusal) =>
+                                  Effect.fail(
+                                    refusal === undefined
+                                      ? threadManagementFailure(error)
+                                      : failure(
+                                          refusal.mode === "runtime"
+                                            ? "runtime_mode_escalation_denied"
+                                            : "interaction_mode_escalation_denied",
+                                          `Thread ${refusal.threadId} runs in ${refusal.runtimeMode}/${refusal.interactionMode}, above this caller's limit.`,
+                                        ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      })
+                      .pipe(
+                        Effect.mapError((error) =>
+                          isMcpFailure(error) ? error : threadManagementFailure(error),
+                        ),
+                      );
+                    if (outcome === "parent_stopped") {
+                      return yield* failure(
+                        "parent_not_active",
+                        "The parent run is no longer active or is stopping.",
+                      );
                     }
-                    const refreshed = yield* threadManagement
-                      .getThreadShell(childThreadId)
-                      .pipe(Effect.mapError(threadManagementFailure));
-                    if (refreshed?.archivedAt !== null || refreshed.deletedAt !== null)
+                    if (outcome === "gone") {
+                      if (!delegationSettingsEqual(settings.delegation, latest.delegation)) {
+                        return yield* failure(
+                          "invalid_request",
+                          "The delegation profile changed. Retry with the current profile.",
+                        );
+                      }
                       return Option.none();
+                    }
                     const followUp = yield* encodeThreadSendInput({
                       threadId: childThreadId,
                       message: "<follow-up task>",
