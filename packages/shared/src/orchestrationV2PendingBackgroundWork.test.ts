@@ -177,6 +177,57 @@ describe("derivePendingBackgroundWork", () => {
     expect(tasks).toEqual([{ taskId: "cmd-1", description: "npm test", kind: "command" }]);
   });
 
+  it("names codemode work by the start of its script, for roster tasks and turn items", () => {
+    const script = `// @options: {"timeout_ms": 60000}\nconst r = await tools.bash({\n  command: "git status",\n});\nreturn r.output;`;
+    const tasks = derivePendingBackgroundWork({
+      latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },
+      providerThreads: [
+        {
+          id: "pt-1" as never,
+          pendingBackgroundTasks: [
+            {
+              taskId: "k9pai4iac",
+              nativeItemId: "toolu_1",
+              description: "codemode/codemode",
+              kind: "background_task",
+            },
+          ],
+        },
+      ],
+      turnItems: [
+        {
+          id: "item-claude" as never,
+          type: "dynamic_tool",
+          status: "completed",
+          title: "Codemode",
+          nativeItemRef: { nativeId: "toolu_1" },
+          input: { code: script },
+        },
+        {
+          id: "item-pi" as never,
+          type: "dynamic_tool",
+          status: "running",
+          title: "codemode",
+          nativeItemRef: { nativeId: "call_2" },
+          input: { code: `return "${"x".repeat(200)}";` },
+        },
+      ],
+    });
+    expect(tasks).toEqual([
+      {
+        taskId: "k9pai4iac",
+        nativeItemId: "toolu_1",
+        description: 'const r = await tools.bash({ command: "git status", }); return r.output;',
+        kind: "background_task",
+      },
+      {
+        taskId: "call_2",
+        description: `return "${"x".repeat(91)}…`,
+        kind: "background_task",
+      },
+    ]);
+  });
+
   it("dedupes roster entries against turn items by native task id", () => {
     const tasks = derivePendingBackgroundWork({
       latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },
@@ -324,6 +375,12 @@ describe("derivePendingBackgroundWork kinds", () => {
             { taskId: "tests", kind: "command", awaited: true },
             { taskId: "watch", kind: "monitor" },
             { taskId: "workflow", kind: "background_task" },
+            {
+              taskId: "followup",
+              kind: "subagent",
+              description: "Review src/math.ts",
+              childThreadId: "thread:child" as never,
+            },
           ],
         },
       ],
@@ -335,6 +392,20 @@ describe("derivePendingBackgroundWork kinds", () => {
           title: "Review src/math.ts",
           nativeItemRef: { nativeId: "sub" },
           childThreadId: "thread:child" as never,
+        },
+        {
+          id: "item-sub-followup" as never,
+          type: "subagent",
+          status: "waiting",
+          title: "Review src/math.ts",
+          childThreadId: "thread:child" as never,
+        },
+        {
+          id: "item-sub-other" as never,
+          type: "subagent",
+          status: "running",
+          title: "Review src/math.ts",
+          childThreadId: "thread:other" as never,
         },
         {
           id: "item-cmd" as never,
@@ -352,10 +423,16 @@ describe("derivePendingBackgroundWork kinds", () => {
       { taskId: "watch", kind: "monitor" },
       { taskId: "workflow", kind: "background_task" },
       {
-        taskId: "sub",
+        taskId: "followup",
         description: "Review src/math.ts",
         kind: "subagent",
         childThreadId: "thread:child",
+      },
+      {
+        taskId: "item-sub-other",
+        description: "Review src/math.ts",
+        kind: "subagent",
+        childThreadId: "thread:other",
       },
       { taskId: "cmd", description: "npm test", kind: "command" },
     ]);
@@ -412,6 +489,12 @@ describe("derivePendingBackgroundWork kinds", () => {
           awaited: true,
         },
         {
+          taskId: "pull-request-watch:github.com/acme/app#4",
+          description: "Watching pull request #4",
+          kind: "monitor",
+          awaited: true,
+        },
+        {
           taskId: "pull-request-watch:github.com/acme/app#5",
           description: "Watching pull request #5",
           kind: "monitor",
@@ -431,6 +514,7 @@ describe("derivePendingBackgroundWork kinds", () => {
         }).map((task) => task.taskId),
       ).toEqual([
         "pull-request-watch:github.com/acme/app#1",
+        "pull-request-watch:github.com/acme/app#4",
         "pull-request-watch:github.com/acme/app#5",
       ]);
     });
@@ -471,6 +555,33 @@ describe("derivePendingBackgroundWork kinds", () => {
         pullRequests: [{ ...link(1, {}), watch: { ...watch, checksPending: true } }],
       });
       expect(backgroundWorkHoldsCompletion(running)).toBe(true);
+
+      // Its watch has yet to wake the agent with the merge, so settling on merge waits for it.
+      const merged = derivePendingBackgroundWork({
+        latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },
+        providerThreads: [],
+        turnItems: [],
+        pullRequests: [
+          {
+            ...link(1, { state: "merged" }),
+            watch: { ...watch, passed: true, checksPending: false },
+          },
+        ],
+      });
+      expect(backgroundWorkHoldsCompletion(merged)).toBe(true);
+
+      const untilMerged = derivePendingBackgroundWork({
+        latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },
+        providerThreads: [],
+        turnItems: [],
+        pullRequests: [
+          {
+            ...link(1, { state: "open" }),
+            watch: { ...watch, passed: true, checksPending: false, until: "merged" as const },
+          },
+        ],
+      });
+      expect(backgroundWorkHoldsCompletion(untilMerged)).toBe(true);
     });
 
     it("lists no watch while a run is active", () => {

@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
   sound: vi.fn(),
+  unlock: vi.fn(),
   badge: vi.fn(),
   settingsListeners: new Set<() => void>(),
 }));
@@ -80,7 +81,7 @@ vi.mock(import("../hooks/useSettings"), async (original) => ({
 vi.mock(import("../threadNotifications"), async (original) => ({
   ...(await original()),
   playNotificationSound: state.sound,
-  unlockNotificationAudio: vi.fn(),
+  unlockNotificationAudio: state.unlock,
   setNotificationBadge: state.badge,
 }));
 
@@ -291,6 +292,42 @@ it("presents completion notifications and sound as soon as the shell completes",
   );
   expect(TestNotification.sent.map((sent) => sent.title)).toEqual(["Thread completed"]);
   expect(state.sound).toHaveBeenCalledWith("completion", expect.any(Function));
+});
+
+it.each([
+  { client: "desktop app", when: "at startup", bridge: {}, beforeGesture: 1 },
+  { client: "browser", when: "on the first gesture", bridge: undefined, beforeGesture: 0 },
+])("readies notification sound in the $client $when", async ({ bridge, beforeGesture }) => {
+  await using app = setup();
+  using _bridge = stubGlobal("desktopBridge", bridge);
+  state.mode = "sound";
+  app.start();
+  expect(state.unlock).toHaveBeenCalledTimes(beforeGesture);
+  document.dispatchEvent(new Event("pointerdown"));
+  expect(state.unlock).toHaveBeenCalledTimes(beforeGesture + 1);
+});
+
+it("stays quiet for the thread in view, but sounds for it once the window loses focus", async () => {
+  await using app = setup();
+  state.mode = "notifications-and-sound";
+  state.inApp = true;
+  focused = true;
+  app.start();
+  app.openThread("one", "thread");
+  const completed = (turnId: string, completedAt: string) =>
+    shell({ latestTurn: { turnId, state: "completed", completedAt } });
+  state.shells.set("one", completed("turn", "2026-09-13T07:00:01.000Z"));
+  expect(state.sound).not.toHaveBeenCalled();
+  expect(state.toast).not.toHaveBeenCalled();
+  expect(TestNotification.sent).toEqual([]);
+  state.shells.set(
+    "one",
+    shell({ latestTurn: { turnId: "next", state: "running", completedAt: null } }),
+  );
+  focused = false;
+  state.shells.set("one", completed("next", "2026-09-13T07:00:05.000Z"));
+  expect(state.sound).toHaveBeenCalledOnce();
+  expect(TestNotification.sent.map(({ title }) => title)).toEqual(["Thread completed"]);
 });
 
 it.each([false, true])(

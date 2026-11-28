@@ -289,9 +289,9 @@ it("app-stream-assistant-turn", async () => {
       .element(page.getByText(`word${STREAM_DELTAS - 1}`, { exact: false }))
       .toBeVisible();
   });
-  // Only the streaming row changes. The timeline renders for the new item and its layout, not
-  // per delta, and history rows not at all.
-  expect(counted.components.ConversationTimeline).toBeLessThanOrEqual(3);
+  // Only the streaming row changes. The timeline renders once for the new item, not per delta or
+  // per scroll frame, and history rows not at all.
+  expect(counted.components.ConversationTimeline).toBe(1);
   expect(counted.components.UserTimelineRow).toBeUndefined();
   expect(counted.components.AssistantTimelineRow).toBe(STREAM_DELTAS);
   // Each delta adds a paragraph; finished blocks keep their render.
@@ -392,7 +392,7 @@ it("app-open-thread-from-draft", async () => {
 
 // Through the diff.toggle shortcut, the same handler as the header's diff button.
 const toggleDiff = (to: "open" | "close") => async () => {
-  await userEvent.keyboard("{Control>}d{/Control}");
+  await userEvent.keyboard("{ControlOrMeta>}d{/ControlOrMeta}");
   const diff = page.getByRole("group", { name: "Diff layout" });
   if (to === "open") await expect.element(diff).toBeVisible();
   else await expect.element(diff).not.toBeInTheDocument();
@@ -443,7 +443,7 @@ it("app-switch-settings-section", async () => {
 // Keep git scenarios last: the status they leave cached adds renders to later scenarios.
 it("app-git-file-counts-with-side-chat", async () => {
   using _clock = frozenClock();
-  useRightPanelStore.getState().openSideChat(scopeThreadRef(ENVIRONMENT_ID, WARM), SIDE_CHAT.id);
+  useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, WARM), SIDE_CHAT.id);
   await using _app = (await openThread(WARM)).screen;
   await expect.element(lastAnswer(SIDE_CHAT.id)).toBeVisible();
   const gitStatus = vcsEnvironment.status({
@@ -485,7 +485,7 @@ it("app-git-file-counts-with-side-chat", async () => {
 // ChatView re-renders when the tree goes dirty or clean; the composer and side chat timeline should not.
 it("app-git-status-updates-with-side-chat", async () => {
   using _clock = frozenClock();
-  useRightPanelStore.getState().openSideChat(scopeThreadRef(ENVIRONMENT_ID, WARM), SIDE_CHAT.id);
+  useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, WARM), SIDE_CHAT.id);
   await using _app = (await openThread(WARM)).screen;
   await expect.element(lastAnswer(SIDE_CHAT.id)).toBeVisible();
   const local = (insertions: number) => ({

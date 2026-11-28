@@ -1,5 +1,5 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -7,7 +7,9 @@ export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
+export const T3_PI_SKILL_POLICY_ENV = "T3_PI_SKILL_POLICY";
 export const PI_T3_SERVICE_TIER_COMMAND = "t3-service-tier";
+export const PI_T3_SESSION_CWD_STATUS_KEY = "t3-session-cwd";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
@@ -17,14 +19,17 @@ import { stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 import { Type } from "typebox";
 
 const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
-const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
+const SKILL_POLICY_ENV = ${JSON.stringify(T3_PI_SKILL_POLICY_ENV)};
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};
+const RUNTIME_INSTRUCTIONS = ${JSON.stringify(buildRuntimeInstructions({ harness: "Pi" }))};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
@@ -251,6 +256,16 @@ function createMcpClient(endpoint: string, token: string) {
 }
 
 export default async function t3McpExtension(pi: ExtensionAPI) {
+  const rawSkillPolicy = env(SKILL_POLICY_ENV);
+  const skillPolicy: { deniedNames: string[]; deniedRoots: string[]; deniedFiles: string[] } =
+    rawSkillPolicy === undefined ? { deniedNames: [], deniedRoots: [], deniedFiles: [] } : JSON.parse(rawSkillPolicy);
+  const deniedSkillNames = new Set(skillPolicy.deniedNames);
+  const deniedSkillFiles = new Set(skillPolicy.deniedFiles);
+  const isDeniedSkillPath = (path: string) => deniedSkillFiles.has(path) || skillPolicy.deniedRoots.some((root) => {
+    const relative = NodePath.relative(root, path);
+    return relative === "" || (relative !== ".." && !relative.startsWith(".." + NodePath.sep) && !NodePath.isAbsolute(relative));
+  });
+
   // RPC has no trust prompt, so Pi skips an untrusted folder's protected resources. Session
   // replacement reruns this factory without project_trust, and T3 drops notices outside a turn,
   // so check each session's first turn. An explicit --no-approve is deliberate and stays quiet.
@@ -275,7 +290,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     const blocks: string[] = [];
     for (const match of event.text.matchAll(/(^|\\s)\\$([^\\s]+)(?=\\s|$)/g)) {
       const name = match[2];
-      if (name === undefined || seen.has(name)) continue;
+      if (name === undefined || seen.has(name) || deniedSkillNames.has(name)) continue;
       const command = commands.find((candidate) => candidate.name === "skill:" + name);
       if (command === undefined) continue;
       seen.add(name);
@@ -361,6 +376,26 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   };
 
   pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName === "read" && skillPolicy.deniedRoots.length > 0 && typeof event.input.path === "string") {
+      const refuse = { block: true, reason: "T3 Code blocked read: the file belongs to a denied Pi skill." };
+      try {
+        let input = event.input.path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
+        if (input.startsWith("@")) input = input.slice(1);
+        if (input === "~") input = NodeOS.homedir();
+        if (input.startsWith("~/") || (process.platform === "win32" && input.startsWith("~\\\\"))) {
+          input = NodePath.join(NodeOS.homedir(), input.slice(2));
+        }
+        if (process.platform === "win32" && !input.includes("\\\\")) {
+          const drive = /^\\/(?:mnt\\/|cygdrive\\/)?([a-z])(?:\\/(.*))?$/i.exec(input);
+          if (drive) input = drive[1] + ":/" + (drive[2] ?? "");
+        }
+        if (input.startsWith("file://")) input = NodeURL.fileURLToPath(input);
+        const path = NodePath.resolve(ctx.cwd, input);
+        if (isDeniedSkillPath(path) || isDeniedSkillPath(await NodeFSP.realpath(path))) return refuse;
+      } catch {
+        return { block: true, reason: "T3 Code could not verify this read against the Pi skill deny list." };
+      }
+    }
     const mode = runtimeMode();
     if (mode === "full-access") return;
     if ((event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) || isReadOnlyMcpTool(event.toolName)) {
@@ -379,6 +414,10 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.setStatus(${JSON.stringify(PI_T3_SESSION_CWD_STATUS_KEY)}, ctx.cwd);
+  });
+
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
   if (endpoint === undefined || token === undefined) {
@@ -394,32 +433,54 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Tool exposure arrived with registerMcpServer in Pi 0.99. Keep the HTTP
   // bridge as the credential owner: mcp.json overrides native registrations.
   const supportsExposure = "registerMcpServer" in pi && typeof pi.registerMcpServer === "function";
-  const directTools = new Set(["orchestrator_capabilities", "delegate_task", "task_status"]);
-  let deferOptionalTools = supportsExposure;
+  const ALIAS_PREFIX = "mcp__t3_code__";
+  let deferTools = supportsExposure;
+  // An alias follows its public tool: gone when --exclude-tools removed it,
+  // off while a direct one is off.
+  const followsPublicTool = (
+    name: string,
+    registered: ReadonlySet<string>,
+    active: ReadonlyArray<string>,
+  ) =>
+    registered.has("mcp__t3-code__" + name) &&
+    (deferTools || active.includes("mcp__t3-code__" + name));
   let catalog: ReadonlyArray<McpTool> = [];
 
   const client = createMcpClient(endpoint, token);
   let started: Promise<void> | undefined;
 
   const registerTools = () => {
-    // Preserve public names for saved loadouts and tool selectors. Hidden
-    // canonical names reserve ownership against Pi's configured MCP servers.
-    const prefixes = supportsExposure ? ["mcp__t3-code__", "mcp__t3_code__"] : ["mcp__t3-code__"];
+    // Preserve public names for saved loadouts and tool selectors. The alias,
+    // Pi's own MCP name for T3, reserves it against Pi's configured MCP servers.
+    // model-only keeps it out of codemode; it hides its own declaration.
+    const prefixes = supportsExposure ? ["mcp__t3-code__", ALIAS_PREFIX] : ["mcp__t3-code__"];
     readOnlyMcpTools.clear();
     for (const tool of catalog) {
       const name = tool.name;
       for (const prefix of prefixes) {
-        if (tool.annotations?.readOnlyHint === true) readOnlyMcpTools.add(\`\${prefix}\${name}\`);
-        const exposure = prefix === "mcp__t3_code__" ? "hidden" :
-          deferOptionalTools && !directTools.has(name) ? "deferred" : "direct";
+        const toolName = \`\${prefix}\${name}\`;
+        if (tool.annotations?.readOnlyHint === true) readOnlyMcpTools.add(toolName);
+        const isAlias = prefix === ALIAS_PREFIX;
+        const exposure = isAlias ? "model-only" : deferTools ? "deferred" : "direct";
         pi.registerTool({
-          name: \`\${prefix}\${name}\`,
+          name: toolName,
           label: name,
-          description: tool.description ?? name,
-          parameters: jsonSchemaToTypebox(tool.inputSchema),
+          // Pi records active declarations in the transcript even when hidden, and
+          // estimates context from them. The model sees only the public schema;
+          // T3's server still validates the arguments.
+          description: isAlias ? "Same as mcp__t3-code__" + name + "." : (tool.description ?? name),
+          parameters: jsonSchemaToTypebox(isAlias ? { type: "object" } : tool.inputSchema),
           ...(supportsExposure ? { outputSchema: mcpOutputSchema(tool) } : {}),
           ...(supportsExposure ? { exposure } : {}),
+          ...(isAlias ? { prepareLoadout: () => ({ hiddenDeclarations: [toolName] }) } : {}),
           async execute(_toolCallId, params, signal) {
+            // Another extension may switch the public tool off after reconciliation.
+            if (
+              isAlias &&
+              !followsPublicTool(name, new Set(pi.getAllTools().map((tool) => tool.name)), pi.getActiveTools())
+            ) {
+              return { content: [{ type: "text", text: \`Tool \${toolName} not found\` }], details: {}, isError: true };
+            }
             const result = await client.callTool(
               name,
               (params ?? {}) as Record<string, unknown>,
@@ -465,10 +526,9 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (!supportsExposure) return;
     // A disabled or replaced search builtin cannot discover deferred tools.
     const hasToolSearch = hasBuiltinToolSearch();
-    const exposureChanged = deferOptionalTools !== hasToolSearch;
-    deferOptionalTools = hasToolSearch;
+    const exposureChanged = deferTools !== hasToolSearch;
+    deferTools = hasToolSearch;
     if (exposureChanged) registerTools();
-    const active = pi.getActiveTools();
     // Completion gateways can silently drop calls to undeclared tools named
     // in history or guidance. Eagerly load T3 schemas, including after tree
     // restores, while retaining deferred exposure for Pi's allowlist rules.
@@ -477,9 +537,39 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       ...(hasToolSearch ? ["tool_search"] : []),
       ...(ctx.model?.api === "openai-completions" ? catalog.map((tool) => "mcp__t3-code__" + tool.name) : []),
     ];
-    const missing = required.filter((name) => !active.includes(name));
-    if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+    const current = pi.getActiveTools();
+    const missing = required.filter((name) => !current.includes(name));
+    if (missing.length > 0) pi.setActiveTools([...current, ...missing]);
+    // An alias is callable only while active, and Pi records every active
+    // declaration in the transcript, hidden or not. Calls to the alias of an
+    // active public tool are renamed at message_end instead.
+    const registered = new Set(pi.getAllTools().map((tool) => tool.name));
+    const loaded = pi.getActiveTools();
+    const aliases = catalog
+      .filter((tool) => registered.has(ALIAS_PREFIX + tool.name) &&
+        followsPublicTool(tool.name, registered, loaded) &&
+        !loaded.includes("mcp__t3-code__" + tool.name))
+      .map((tool) => ALIAS_PREFIX + tool.name);
+    const kept = loaded.filter((name) => !name.startsWith(ALIAS_PREFIX) || aliases.includes(name));
+    const added = aliases.filter((name) => !loaded.includes(name));
+    if (added.length > 0 || kept.length !== loaded.length) pi.setActiveTools([...kept, ...added]);
   };
+
+  // Pi runs a message's tool calls after message_end handlers replace it.
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (!supportsExposure || message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
+    const active = pi.getActiveTools();
+    let renamed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "toolCall" || !part.name.startsWith(ALIAS_PREFIX)) return part;
+      const publicName = "mcp__t3-code__" + part.name.slice(ALIAS_PREFIX.length);
+      if (!active.includes(publicName)) return part;
+      renamed = true;
+      return { ...part, name: publicName };
+    });
+    return renamed ? { message: { ...message, content } } : undefined;
+  });
 
   // Tree navigation restores its saved loadout after session_start.
   pi.on("session_tree", (_event, ctx) => reconcileDiscovery(ctx));
@@ -494,16 +584,16 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
   });
 
-  // Keep guidance in the system prompt so leading slash commands still expand.
+  // Keep the note in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
     reconcileDiscovery(ctx);
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.
-      sections.t3_code_orchestration = ORCHESTRATION_INSTRUCTIONS;
+      sections.t3_code_runtime = RUNTIME_INSTRUCTIONS;
       return undefined;
     }
-    return { systemPrompt: event.systemPrompt + "\\n\\n" + ORCHESTRATION_INSTRUCTIONS };
+    return { systemPrompt: event.systemPrompt + "\\n\\n" + RUNTIME_INSTRUCTIONS };
   });
 }
 `;

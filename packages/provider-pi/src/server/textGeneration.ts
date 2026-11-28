@@ -4,17 +4,27 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { TextGenerationError } from "@t3tools/contracts";
+import { ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import {
+  brokenVersionDetail,
+  noCompatibilityPolicy,
+  type ProviderCompatibilityLookup,
+} from "@t3tools/provider-core/server/compatibility";
 import { parseGenericCliVersion } from "@t3tools/provider-core/server/snapshotProbe";
 import type { PiSettings } from "../settings.ts";
 
-import { makePiRpcConnection, piRecordField, piRecordString, resolvePiModelSlug } from "./rpc.ts";
+import {
+  makePiRpcConnection,
+  piExcludedModelRefusal,
+  piRecordField,
+  piRecordString,
+  resolvePiModelSlug,
+} from "./rpc.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
 import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import { isPiThinkingLevel } from "./modelCapabilities.ts";
-import { MINIMUM_PI_VERSION, runPiVersionCommand } from "./status.ts";
+import { runPiVersionCommand } from "./status.ts";
 
 const PI_TIMEOUT_MS = 180_000;
 
@@ -32,6 +42,7 @@ const piTurnErrorDetail = (errorMessage: string | undefined) => {
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  compatibility: ProviderCompatibilityLookup = noCompatibilityPolicy,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -48,11 +59,16 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
           Option.isSome(output) && output.value.code === 0
             ? parseGenericCliVersion(`${output.value.stdout}\n${output.value.stderr}`)
             : null;
-        if (version === null || compareSemverVersions(version, MINIMUM_PI_VERSION) < 0) {
-          return yield* new TextGenerationError({
-            operation,
-            detail: `Pi ${MINIMUM_PI_VERSION} or newer is required for text generation thinking options. Update Pi and try again.`,
-          });
+        const broken =
+          version === null
+            ? "T3 Code could not determine the Pi version. Update Pi and try again."
+            : brokenVersionDetail({
+                name: "Pi",
+                version,
+                advisory: yield* compatibility(ProviderDriverKind.make("pi"), version),
+              });
+        if (broken !== undefined) {
+          return yield* new TextGenerationError({ operation, detail: broken });
         }
       }
 
@@ -81,7 +97,20 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         env: launch.env,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
-      if (modelSelection.model !== "default") {
+      if (modelSelection.model === "default") {
+        const defaultModel = piRecordField(
+          yield* connection.request({ type: "get_state" }),
+          "model",
+        );
+        const provider = piRecordString(defaultModel, "provider");
+        const modelId = piRecordString(defaultModel, "id");
+        const refusal =
+          provider === undefined || modelId === undefined
+            ? undefined
+            : piExcludedModelRefusal(provider, modelId);
+        if (refusal !== undefined)
+          return yield* new TextGenerationError({ operation, detail: refusal });
+      } else {
         // Reject unusable custom slugs; silently using Pi's default would misreport the requested model.
         const inventory = yield* connection
           .request({ type: "get_available_models" })
@@ -93,6 +122,9 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
             detail: `Pi model '${modelSelection.model}' must use provider/model format.`,
           });
         }
+        const refusal = piExcludedModelRefusal(parsed.provider, parsed.modelId);
+        if (refusal !== undefined)
+          return yield* new TextGenerationError({ operation, detail: refusal });
         yield* connection
           .request({ type: "set_model", provider: parsed.provider, modelId: parsed.modelId })
           .pipe(
@@ -138,6 +170,9 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
           }
         }
       });
+      if (turnError !== undefined) {
+        return yield* new TextGenerationError({ operation, detail: turnError });
+      }
       const data = yield* connection.request({ type: "get_last_assistant_text" });
       const text =
         typeof data === "object" &&
@@ -148,7 +183,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       if (!text) {
         return yield* new TextGenerationError({
           operation,
-          detail: turnError ?? "Pi returned empty output.",
+          detail: "Pi returned empty output.",
         });
       }
       return yield* TextGenerationOperations.decodeJsonReply(request, "Pi", text);

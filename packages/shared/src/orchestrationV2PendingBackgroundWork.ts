@@ -87,6 +87,18 @@ export function deriveBlockedOnThreadWait(input: {
   return hasWait;
 }
 
+/** A provider instance's background subagent outlives its run and still calls tools. */
+export function hasPendingBackgroundSubagent(
+  tasks: ReadonlyArray<PendingBackgroundWorkTask> | undefined,
+  providerInstanceId: OrchestrationV2ProviderThread["providerInstanceId"] | undefined,
+): boolean {
+  return (
+    tasks?.some(
+      (task) => task.kind === "subagent" && task.providerInstanceId === providerInstanceId,
+    ) ?? false
+  );
+}
+
 export function backgroundWorkHoldsCompletion(
   tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind" | "awaited">>,
 ): boolean {
@@ -157,6 +169,7 @@ type PendingBackgroundWorkTurnItem = {
   readonly monitor?: boolean | undefined;
   readonly prompt?: string | undefined;
   readonly childThreadId?: ThreadId | null;
+  readonly origin?: Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>["origin"];
 };
 
 function isLatestRunSettledForBackgroundWait(
@@ -175,7 +188,38 @@ function isPersistentDynamicToolInput(input: unknown): boolean {
   return Reflect.get(input, "persistent") === true;
 }
 
+const CODE_PREVIEW_LENGTH = 100;
+
+/** The script of a codemode call, which every harness passes as the tool's `code` input. */
+export function codemodeScript(item: {
+  readonly type: string;
+  readonly input?: unknown;
+}): string | undefined {
+  if (item.type !== "dynamic_tool" || item.input === null || typeof item.input !== "object") {
+    return undefined;
+  }
+  const code = Reflect.get(item.input, "code");
+  return typeof code === "string" && code.trim().length > 0 ? code : undefined;
+}
+
+function codePreview(item: PendingBackgroundWorkTurnItem): string | undefined {
+  const code = codemodeScript(item);
+  if (code === undefined) return undefined;
+  const preview = code
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("// @options"))
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (preview.length === 0) return undefined;
+  return preview.length > CODE_PREVIEW_LENGTH
+    ? `${preview.slice(0, CODE_PREVIEW_LENGTH - 1).trimEnd()}…`
+    : preview;
+}
+
 function descriptionFromTurnItem(item: PendingBackgroundWorkTurnItem): string | undefined {
+  const preview = codePreview(item);
+  if (preview !== undefined) return preview;
   if (typeof item.title === "string" && item.title.trim().length > 0) {
     return item.title.trim();
   }
@@ -211,6 +255,7 @@ function pendingTaskFromTurnItem(
           ? {}
           : { providerInstanceId: item.owningProviderInstanceId }),
         ...(item.childThreadId == null ? {} : { childThreadId: item.childThreadId }),
+        ...(item.origin === "app_owned" ? { detached: true } : {}),
       };
     case "command_execution":
       return { ...named, kind: item.monitor === true ? "monitor" : "command" };
@@ -285,7 +330,11 @@ export function derivePendingBackgroundWork(input: {
         continue;
       }
       const { description: rawDescription, ...named } = task;
-      const description = rawDescription?.trim();
+      const nativeId = task.nativeItemId ?? task.taskId;
+      const item = input.turnItems.findLast(
+        (candidate) => nativeTaskIdFromTurnItem(candidate) === nativeId,
+      );
+      const description = (item && codePreview(item)) ?? rawDescription?.trim();
       byTaskId.set(task.taskId, {
         ...named,
         ...(task.kind === "subagent"
@@ -307,17 +356,21 @@ export function derivePendingBackgroundWork(input: {
 
   for (const task of pullRequestWatchTasks(input.pullRequests)) byTaskId.set(task.taskId, task);
 
-  return Array.from(byTaskId.values());
+  // Follow-up tasks can share a child thread; the pending list counts agents, not messages.
+  const childThreadIds = new Set<ThreadId>();
+  return Array.from(byTaskId.values()).filter((task) => {
+    if (task.kind !== "subagent" || task.childThreadId == null) return true;
+    if (childThreadIds.has(task.childThreadId)) return false;
+    childThreadIds.add(task.childThreadId);
+    return true;
+  });
 }
 
 function pullRequestWatchTasks(
   pullRequests: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined,
 ): Array<PendingBackgroundWorkTask> {
   return (pullRequests ?? []).flatMap((link) =>
-    // The watch reactor ends a merged PR's watch without waking the agent, so it holds nothing.
-    link.watch === undefined ||
-    link.source === "stack-dismissed" ||
-    link.snapshot?.state === "merged"
+    link.watch === undefined || link.source === "stack-dismissed"
       ? []
       : [
           {
@@ -326,8 +379,14 @@ function pullRequestWatchTasks(
             taskId: `${PULL_REQUEST_WATCH_TASK_ID}${link.host.toLowerCase()}/${link.repository.toLowerCase()}#${link.number}`,
             description: `Watching pull request #${link.number}`,
             kind: "monitor" as const,
-            // Once every check finished, a person moves the PR next: the watch stays on but holds nothing.
-            ...(link.watch.checksPending === false ? {} : { awaited: true as const }),
+            // Once every check finished, a person moves the PR next: the watch stays on but holds
+            // nothing, unless the agent said it acts on the PR itself. A merged PR's watch holds
+            // until its read wakes the agent, so settling on merge waits.
+            ...(link.watch.checksPending === false &&
+            link.watch.until !== "merged" &&
+            link.snapshot?.state !== "merged"
+              ? {}
+              : { awaited: true as const }),
           },
         ],
   );

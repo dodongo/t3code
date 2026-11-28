@@ -8,7 +8,6 @@ import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -276,7 +275,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
            process.stdout.write(result);`,
       );
       const first = yield* Effect.forkChild(
-        Effect.exit(buildDesktopBundles(root, "0.0.43", false)).pipe(
+        buildDesktopBundles(root, "0.0.43", false).pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fs,
             writeFileString: (filePath, contents, options) =>
@@ -306,8 +305,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.equal(Number(exitCode), 0, stderr);
         assert.equal(stdout, "DesktopBuildAlreadyRunningError");
       }).pipe(Effect.ensuring(Deferred.succeed(resume, undefined)));
-      const firstExit = yield* Fiber.join(first);
-      assert.isTrue(Exit.isSuccess(firstExit));
+      yield* Fiber.join(first);
       assert.equal(yield* fs.readFileString(path.join(root, "version.txt")), "0.0.43");
       for (const relativePath of releasePackageFiles) {
         assert.equal(yield* fs.readFileString(path.join(root, relativePath)), original);
@@ -592,7 +590,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
-  it.effect("declares Calendar access for hosted commands in macOS builds", () =>
+  it.effect("declares Calendar and Apple Events access for hosted commands in macOS builds", () =>
     Effect.gen(function* () {
       for (const version of ["0.1.0", "0.1.1-nightly.20261019.1"]) {
         for (const signed of [false, true]) {
@@ -610,6 +608,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             "NSCalendarsUsageDescription",
             "NSCalendarsFullAccessUsageDescription",
             "NSCalendarsWriteOnlyAccessUsageDescription",
+            "NSAppleEventsUsageDescription",
           ]) {
             assert.isString(mac.extendInfo[key], `${version}, signed=${signed}: ${key}`);
             assert.isNotEmpty(mac.extendInfo[key]);
@@ -1591,6 +1590,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+    assert.match(
+      entitlements,
+      /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\/>/u,
+    );
     assert.match(entitlements, /<key>com\.apple\.security\.device\.camera<\/key>\s*<true\/>/u);
     assert.match(entitlements, /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/u);
     assert.notInclude(entitlements, "keychain-access-groups");

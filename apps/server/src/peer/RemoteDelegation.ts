@@ -35,11 +35,7 @@ import { withExecutedModelNote } from "@t3tools/provider-core/server/subagentPro
 
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
-import {
-  resolveInteractionMode,
-  resolveRuntimeMode,
-  taskPrompt,
-} from "../mcp/delegatedTaskModes.ts";
+import { resolveRuntimeMode, taskPrompt } from "../mcp/delegatedTaskModes.ts";
 import { followUpOwnerRun } from "../orchestration-v2/CommandPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -328,10 +324,6 @@ const make = Effect.gen(function* () {
         input.runtimeMode === undefined || input.runtimeMode === "inherit"
           ? undefined
           : yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
-      const interactionMode =
-        input.interactionMode === undefined || input.interactionMode === "inherit"
-          ? undefined
-          : yield* resolveInteractionMode(parent.thread.interactionMode, input.interactionMode);
       const projectId = yield* resolveRemoteProject(
         scope,
         target.environmentId,
@@ -353,7 +345,6 @@ const make = Effect.gen(function* () {
           title,
           modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
-          ...(interactionMode === undefined ? {} : { interactionMode }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
           // The thread there shows it is this thread's subagent, with a way back.
@@ -615,19 +606,25 @@ const make = Effect.gen(function* () {
     remote: OrchestrationV2RemoteTaskChild,
     runId: RunId | null,
     failed = false,
+    probeSuccess = true,
   ) {
     let reply: OrchestratorMcpThreadTimelineItem | undefined;
     let error: OrchestratorMcpThreadTimelineItem | undefined;
-    let afterPosition: number | undefined;
+    // Linked peers read newest first without a cursor; this scan runs forward.
+    let afterPosition = -1;
     let run: OrchestratorMcpThreadRun | undefined;
+    let remainingItems = 0;
+    let tailProbed = false;
     while (true) {
       const read = yield* forwarding.readThread(scope, remote.environmentId, {
         threadId: remote.threadId,
         view: failed ? "activity" : "messages",
         limit: 100,
         runLimit: 50,
-        maxCharsPerItem: 20_000,
-        ...(afterPosition === undefined ? {} : { afterPosition }),
+        // Keep the first and expected final activity pages whole. A result on a
+        // middle page then needs an extra text read after the scan.
+        maxCharsPerItem: failed && remainingItems > 100 ? 1 : 20_000,
+        afterPosition,
       });
       run ??= read.recentRuns.find((candidate) => candidate.runId === runId);
       reply =
@@ -641,7 +638,28 @@ const make = Effect.gen(function* () {
           ) ?? error;
       }
       if (!read.hasMore || read.nextPosition === null) break;
+      if (!failed && probeSuccess && !tailProbed) {
+        tailProbed = true;
+        const tailPosition = Math.floor((read.thread.itemCount - 1) / 100) * 100 - 1;
+        if (tailPosition > read.nextPosition) {
+          const tail = yield* forwarding.readThread(scope, remote.environmentId, {
+            threadId: remote.threadId,
+            view: "messages",
+            limit: 100,
+            maxCharsPerItem: 20_000,
+            afterPosition: tailPosition,
+          });
+          const tailReply = tail.items.findLast(
+            (item) => item.type === "assistant_message" && (runId === null || item.runId === runId),
+          );
+          if (!tail.hasMore && tailReply !== undefined) {
+            reply = tailReply;
+            break;
+          }
+        }
+      }
       afterPosition = read.nextPosition;
+      remainingItems = read.thread.itemCount - afterPosition - 1;
     }
     reply = error ?? reply;
     const executedModel = run?.executedModel ?? undefined;
@@ -861,7 +879,13 @@ const make = Effect.gen(function* () {
       waited.resultRun !== undefined && !sharedThread
         ? waited.resultRun
         : { runId: waited.runId, status: waited.status };
-    const result = yield* lastReply(scope, remote, resultRun.runId, resultRun.status === "failed");
+    const result = yield* lastReply(
+      scope,
+      remote,
+      resultRun.runId,
+      resultRun.status === "failed",
+      resultRun.status === "completed",
+    );
     yield* complete(
       parentThreadId,
       taskId,

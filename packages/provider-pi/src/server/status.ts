@@ -1,5 +1,6 @@
 import { resolveProviderProbeTimeoutMs } from "@t3tools/provider-core/server/snapshotProbe";
 import {
+  ProviderDriverKind,
   type CustomModelSetting,
   type ServerProvider,
   type ServerProviderModel,
@@ -7,7 +8,11 @@ import {
 import type { PiSettings } from "../settings.ts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import {
+  brokenVersionDetail,
+  noCompatibilityPolicy,
+  type ProviderCompatibilityLookup,
+} from "@t3tools/provider-core/server/compatibility";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -23,6 +28,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
 import {
+  isPiExcludedModel,
   makePiRpcConnection,
   PiRpcError,
   PiRpcTimeoutError,
@@ -61,8 +67,6 @@ const PI_PRESENTATION = {
 const VERSION_PROBE_TIMEOUT_MS = 10_000;
 const PI_RPC_DISCOVERY_TIMEOUT_MS = 30_000;
 const PI_TEXT_GENERATION_DISCOVERY_TIMEOUT_MS = 5_000;
-// Earlier releases persist background set_thinking_level requests as the user's global default.
-export const MINIMUM_PI_VERSION = "0.84.3";
 
 const decodePiAuthCheck = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ reason: Schema.optional(Schema.String) })),
@@ -82,14 +86,17 @@ interface PiDiscovery extends PiDiscoveredCommands {
   readonly unavailableActiveModel: { readonly provider: string; readonly id: string } | undefined;
   /** Pi without extensions can load no model, so text generation fails for every entry. */
   readonly textGenerationUnavailable: boolean;
+  /** Pi's active model is one T3 Code runs only through another provider, such as Claude. */
+  readonly excludedDefaultModel: boolean;
 }
 
 function piModelsFromSettings(
   customModels: ReadonlyArray<CustomModelSetting> | undefined,
   discovered: ReadonlyArray<ServerProviderModel> = [],
+  offerDefaultModel = true,
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
-    [PI_DEFAULT_MODEL, ...discovered],
+    offerDefaultModel ? [PI_DEFAULT_MODEL, ...discovered] : discovered,
     customModels ?? [],
     EMPTY_PI_MODEL_CAPABILITIES,
   );
@@ -119,7 +126,7 @@ function parseDiscoveredModels(
       );
     }
     const slug = `${provider}/${id}`;
-    if (seen.has(slug)) continue;
+    if (seen.has(slug) || isPiExcludedModel(provider, id)) continue;
     seen.add(slug);
     parsed.push({
       slug,
@@ -275,6 +282,10 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
   const activeModel = recordField(stateData, "model");
   const activeProvider = recordString(activeModel, "provider");
   const activeModelId = recordString(activeModel, "id");
+  const excludedDefaultModel =
+    activeProvider !== undefined &&
+    activeModelId !== undefined &&
+    isPiExcludedModel(activeProvider, activeModelId);
   return {
     models:
       textGenerationModelSlugs === undefined
@@ -290,44 +301,55 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
     unavailableActiveModel:
       activeProvider !== undefined &&
       activeModelId !== undefined &&
+      !excludedDefaultModel &&
       !discoveredModels.some((model) => model.subProvider === activeProvider)
         ? { provider: activeProvider, id: activeModelId }
         : undefined,
     textGenerationUnavailable: textGenerationModelSlugs?.size === 0,
+    excludedDefaultModel,
   } satisfies PiDiscovery;
 }, Effect.scoped);
 
-export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
-  function* (piSettings: PiSettings, environment: NodeJS.ProcessEnv, cwd: string) {
-    const launchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
-    if (!launchArgs.ok) {
-      return yield* new PiRpcError({ operation: "launch", detail: launchArgs.message });
-    }
-    const connection = yield* makePiDiscoveryConnection(
-      piSettings,
-      providerProbeEnvironment(environment),
-      launchArgs.args,
-      cwd,
-    );
-    // A failed read must not replace a previously usable workspace catalog with an empty one.
-    const commandsData = yield* connection.request(
-      { type: "get_commands" },
-      resolveProviderProbeTimeoutMs("pi", PI_RPC_DISCOVERY_TIMEOUT_MS, environment),
-    );
-    const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
-    return { slashCommands: withPiBuiltinSlashCommands(slashCommands), skills };
+export const readPiCommandsForCwd = Effect.fn("readPiCommandsForCwd")(
+  function* (
+    piSettings: PiSettings,
+    environment: NodeJS.ProcessEnv,
+    cwd: string,
+    launchArgs: ReadonlyArray<string>,
+    timeoutMs: number,
+  ) {
+    const connection = yield* makePiDiscoveryConnection(piSettings, environment, launchArgs, cwd);
+    return yield* connection.request({ type: "get_commands" }, timeoutMs);
   },
   Effect.scoped,
-  (effect, _settings, environment) => {
-    const timeoutMs = resolveProviderProbeTimeoutMs("pi", PI_RPC_DISCOVERY_TIMEOUT_MS, environment);
-    return effect.pipe(
+  (effect, _settings, _environment, _cwd, _launchArgs, timeoutMs) =>
+    effect.pipe(
       Effect.timeoutOrElse({
         duration: timeoutMs,
         orElse: () => Effect.fail(new PiRpcTimeoutError({ operation: "discovery", timeoutMs })),
       }),
-    );
-  },
+    ),
 );
+
+export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(function* (
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+  cwd: string,
+) {
+  const launchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
+  if (!launchArgs.ok) {
+    return yield* new PiRpcError({ operation: "launch", detail: launchArgs.message });
+  }
+  const commandsData = yield* readPiCommandsForCwd(
+    piSettings,
+    providerProbeEnvironment(environment),
+    cwd,
+    launchArgs.args,
+    resolveProviderProbeTimeoutMs("pi", PI_RPC_DISCOVERY_TIMEOUT_MS, environment),
+  );
+  const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
+  return { slashCommands: withPiBuiltinSlashCommands(slashCommands), skills };
+});
 
 export const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionCommand")(function* (
   piSettings: PiSettings,
@@ -433,6 +455,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
   cwd?: string,
+  compatibility: ProviderCompatibilityLookup = noCompatibilityPolicy,
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = piModelsFromSettings(piSettings.customModels);
@@ -526,12 +549,19 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: `T3 Code could not determine the Pi version. Pi ${MINIMUM_PI_VERSION} or newer is required.`,
+        message: "T3 Code could not determine the Pi version. Update Pi, then refresh its status.",
       },
     });
   }
 
-  if (compareSemverVersions(version, MINIMUM_PI_VERSION) < 0) {
+  // Stop before discovery: releases the policy rates broken persist background
+  // set_thinking_level requests as the user's global default.
+  const broken = brokenVersionDetail({
+    name: "Pi",
+    version,
+    advisory: yield* compatibility(ProviderDriverKind.make("pi"), version),
+  });
+  if (broken !== undefined) {
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -542,7 +572,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "error",
         auth: { status: "unknown" },
-        message: `Pi ${version} is unsupported. Update to Pi ${MINIMUM_PI_VERSION} or newer.`,
+        message: broken,
       },
     });
   }
@@ -616,7 +646,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
 
   const discovery = discoveryExit.value.value;
-  const models = piModelsFromSettings(piSettings.customModels, discovery.models);
+  const models = piModelsFromSettings(
+    piSettings.customModels,
+    discovery.models,
+    !discovery.excludedDefaultModel,
+  );
   const message = !discovery.authenticated
     ? "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent."
     : discovery.unavailableActiveModel === undefined

@@ -4,8 +4,11 @@ import type { DesktopUpdateState } from "@t3tools/contracts";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateIdleTooltip,
   getDesktopUpdateReleaseHistoryUrl,
+  getDesktopUpdateActionError,
   getDesktopUpdateReleaseUrl,
+  installDesktopUpdate,
   resolveDesktopUpdateButtonAction,
 } from "./desktopUpdate.logic";
 
@@ -58,6 +61,75 @@ describe("desktop update button state", () => {
     );
   });
 
+  it("shows the install failure after the desktop returns to downloaded", () => {
+    // reduceDesktopUpdateStateOnInstallFailure: a refused macOS install prompt lands here.
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+      message: "Desktop updater install operation reported an error.",
+      errorContext: "install",
+      canRetry: true,
+    };
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+    expect(getDesktopUpdateButtonTooltip(state)).toBe("Install failed for 1.1.0. Click to retry.");
+  });
+
+  it("reports an install the desktop refuses after accepting it", async () => {
+    const downloaded: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+    };
+    const failed: DesktopUpdateState = {
+      ...downloaded,
+      message: "OSStatus error -60006.",
+      errorContext: "install",
+      canRetry: true,
+    };
+    const listeners = new Set<(state: DesktopUpdateState) => void>();
+    const emit = (state: DesktopUpdateState) => listeners.forEach((listener) => listener(state));
+    const install = installDesktopUpdate({
+      onUpdateState: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      installUpdate: async () => {
+        // A retry's pre-install check can restore the previous failure before the restart starts.
+        emit(failed);
+        return { accepted: true, completed: false, state: downloaded };
+      },
+    });
+    let settled = false;
+    void install.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    emit(failed);
+    const result = await install;
+    expect(getDesktopUpdateActionError(result)).toBe("OSStatus error -60006.");
+    expect(listeners.size).toBe(0);
+  });
+
+  it("never calls a build on the other track up to date", () => {
+    // A Stable build whose switch to Nightly did not finish; the updater discards every release.
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "up-to-date",
+      channel: "nightly",
+      currentVersion: "0.1.5",
+      checkedAt: "2026-11-18T00:00:00.000Z",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).not.toBe("Up to date");
+    expect(
+      getDesktopUpdateButtonTooltip({ ...state, currentVersion: "0.1.6-nightly.20261118.1" }),
+    ).toBe("Up to date");
+  });
+
   it("prefers a newly available release over a stale downloaded version", () => {
     const state: DesktopUpdateState = {
       ...baseState,
@@ -92,6 +164,32 @@ describe("desktop update UI helpers", () => {
       );
     },
   );
+});
+
+describe("getDesktopUpdateIdleTooltip", () => {
+  const selfUpdateOff: DesktopUpdateState = {
+    ...baseState,
+    enabled: false,
+    status: "disabled",
+    availableVersion: "1.1.0",
+    message:
+      "T3 Code 1.1.0 is out. This build does not update itself: rebase it onto v1.1.0 and rebuild.",
+  };
+
+  it("names the stable release a build without updates should rebuild from", () => {
+    expect(resolveDesktopUpdateButtonAction(selfUpdateOff)).toBe("none");
+    expect(getDesktopUpdateIdleTooltip(selfUpdateOff)).toEqual({
+      title: "T3 Code 1.1.0 available",
+      detail: selfUpdateOff.message,
+    });
+  });
+
+  it("gives an administrator's denial precedence over the stable release", () => {
+    expect(getDesktopUpdateIdleTooltip(selfUpdateOff, "Updates are managed.")).toEqual({
+      title: "Updates unavailable",
+      detail: "Updates are managed.",
+    });
+  });
 });
 
 describe("canCheckForUpdate", () => {

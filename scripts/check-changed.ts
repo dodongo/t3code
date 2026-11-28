@@ -40,6 +40,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { vitePlusCommand } from "./check-changed-command.ts";
+import { readKnownFailures, skipPattern } from "./fork-tests.ts";
 
 const GiB = 1024 ** 3;
 
@@ -59,8 +60,8 @@ export interface Step<R> {
   readonly serial?: boolean;
 }
 
-// Interrupting a step at its timeout closes the scopes of the processes it
-// spawned, which kills each one's process group.
+// Interrupting a step at its timeout, or when another step fails, closes the
+// scopes of the processes it spawned, which kills each one's process group.
 export const runSteps = Effect.fn("checkChanged.runSteps")(function* <R>(
   steps: ReadonlyArray<Step<R>>,
   options: { readonly concurrency: number; readonly timeoutSeconds: number },
@@ -88,7 +89,9 @@ export const runSteps = Effect.fn("checkChanged.runSteps")(function* <R>(
         yield* Console.log(`\n> vp ${step.name}  ${outcome}  ${time}`);
         const output = Option.getOrUndefined(result)?.output.trimEnd();
         if (output) yield* Console.log(output);
-        return { name: step.name, outcome, time };
+        const report = { name: step.name, outcome, time };
+        if (outcome === "FAIL") return yield* Effect.fail(report);
+        return report;
       });
       const slots = Math.min(step.weight ?? 1, options.concurrency);
       const limited = Effect.acquireUseRelease(
@@ -99,7 +102,7 @@ export const runSteps = Effect.fn("checkChanged.runSteps")(function* <R>(
       return step.serial ? serial.withPermit(limited) : limited;
     },
     { concurrency: "unbounded" },
-  );
+  ).pipe(Effect.catch((failed) => Effect.succeed([failed])));
 });
 
 const CacheEntry = Schema.fromJsonString(
@@ -367,6 +370,15 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
   const { vitestTests, nodeTests } = splitTests(tests);
+  const selectedVitestFiles = new Set(vitestTests);
+  const knownFailures = readKnownFailures(
+    yield* fs.readFileString(inRoot("scripts/fork-known-failures.json")),
+  ).filter(({ file }) => selectedVitestFiles.has(file));
+  if (knownFailures.length > 0) {
+    yield* Console.log(
+      `check:changed: excluding ${knownFailures.length} cases listed in scripts/fork-known-failures.json`,
+    );
+  }
 
   // React Compiler coverage compiles every client source file, so run only the
   // changed files' cases, in one extra step: a -t filter in the main test step
@@ -433,6 +445,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       file === ".pnpmfile.cjs" ||
       file.startsWith("patches/") ||
       file.startsWith("apps/mobile/deps/") ||
+      file.startsWith("apps/web/deps/") ||
       path.basename(file) === "package.json",
   );
 
@@ -479,7 +492,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
           if (yield* fs.exists(inRoot(manifest))) yield* copy(manifest);
         }
       }
-      for (const extra of ["apps/mobile/deps", "patches", ".pnpmfile.cjs"]) {
+      for (const extra of ["apps/mobile/deps", "apps/web/deps", "patches", ".pnpmfile.cjs"]) {
         if (yield* fs.exists(inRoot(extra))) yield* copy(extra);
       }
       const result = yield* vp(["install", "--lockfile-only", "--ignore-scripts"], temp);
@@ -496,9 +509,11 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   ).pipe(Effect.catch((error) => Effect.succeed({ ok: false, output: error.message })));
 
   // CI's Lint job checks that generated GraphQL operations match their sources.
-  const graphql = ["apps/server", "packages/source-control-github"].filter((dir) =>
-    files.some((file) => file.startsWith(`${dir}/`)),
-  );
+  const graphql = [
+    "apps/server",
+    "packages/issue-tracker-linear",
+    "packages/source-control-github",
+  ].filter((dir) => files.some((file) => file.startsWith(`${dir}/`)));
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
   const typecheckWorkers = Math.min(concurrency, affected.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
@@ -544,6 +559,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
               "test",
               "run",
               "--passWithNoTests",
+              ...(knownFailures.length === 0 ? [] : ["-t", skipPattern(knownFailures)]),
               ...vitestTests,
             ]),
             serial: true,

@@ -6,6 +6,32 @@ export function materializeReplayTranscriptRuntimeInstructions(
   transcript: ProviderReplayTranscript,
   runtime: { readonly driver: ProviderDriverKind; readonly model: string },
 ): ProviderReplayTranscript {
+  if (runtime.driver === "muse") {
+    return {
+      ...transcript,
+      entries: transcript.entries.map((entry) => {
+        if (entry.type !== "expect_outbound") return entry;
+        const frame = asFrame(entry.frame);
+        if (frame?.method !== "turn/start" || !isRecord(frame.params)) return entry;
+        const { input, reasoningEffort } = frame.params;
+        if (!Array.isArray(input) || !promptPartText(input[0])?.startsWith("<runtime_info>")) {
+          return entry;
+        }
+        const text = buildRuntimeInstructions({
+          harness: "Muse Code",
+          model: runtime.model,
+          reasoningEffort: typeof reasoningEffort === "string" ? reasoningEffort : undefined,
+        });
+        return {
+          ...entry,
+          frame: {
+            ...frame,
+            params: { ...frame.params, input: [{ type: "text", text }, ...input.slice(1)] },
+          },
+        };
+      }),
+    };
+  }
   const harness =
     runtime.driver === "cursor"
       ? "Cursor"
@@ -56,12 +82,71 @@ export function materializeReplayTranscriptRuntimeInstructions(
       }
     | undefined;
   let pendingKiroCompact: { readonly sessionId: unknown } | undefined;
+  const cursorSessionKey = "cursor";
+  let cursorAgentId: string | undefined;
+  let interruptedCursorNotes:
+    | {
+        readonly agentId: string | undefined;
+        readonly notes: string;
+      }
+    | undefined;
+  let pendingCursorRun:
+    | {
+        readonly notes: string | undefined;
+        readonly compact: boolean;
+        compacted: boolean;
+      }
+    | undefined;
 
   return {
     ...transcript,
     entries: transcript.entries.map((entry) => {
       if (entry.type === "emit_inbound") {
         const frame = asFrame(entry.frame);
+        if (runtime.driver === "cursor") {
+          if (
+            (frame?.type === "agent.opened" || frame?.type === "run.started") &&
+            typeof frame.agentId === "string"
+          ) {
+            cursorAgentId = frame.agentId;
+          }
+          const cursorUpdate =
+            frame?.type === "interaction.update" && isRecord(frame.update)
+              ? frame.update
+              : undefined;
+          if (cursorUpdate?.type === "summary-completed" && cursorUpdate.failed !== true) {
+            deliveredNotes.delete(cursorSessionKey);
+            if (interruptedCursorNotes?.agentId === cursorAgentId) {
+              interruptedCursorNotes = undefined;
+            }
+            if (pendingCursorRun !== undefined) pendingCursorRun.compacted = true;
+          }
+          if (frame?.type === "run.completed" && pendingCursorRun !== undefined) {
+            const status = isRecord(frame.result) ? frame.result.status : undefined;
+            if (pendingCursorRun.compact) {
+              deliveredNotes.delete(cursorSessionKey);
+            } else if (
+              status === "finished" &&
+              !pendingCursorRun.compacted &&
+              pendingCursorRun.notes !== undefined
+            ) {
+              deliveredNotes.set(cursorSessionKey, pendingCursorRun.notes);
+              interruptedCursorNotes = undefined;
+            } else if (status !== "finished") {
+              if (pendingCursorRun.notes !== undefined) {
+                deliveredNotes.delete(cursorSessionKey);
+              }
+              interruptedCursorNotes =
+                status === "cancelled" &&
+                !pendingCursorRun.compacted &&
+                pendingCursorRun.notes !== undefined
+                  ? { agentId: cursorAgentId, notes: pendingCursorRun.notes }
+                  : undefined;
+            }
+            pendingCursorRun = undefined;
+          }
+          return entry;
+        }
         if (frame?.kind === "response" && frame.method === "session/prompt" && pendingPrompt) {
           const stopReason = isRecord(frame.result) ? frame.result.stopReason : undefined;
           const delivered =
@@ -119,16 +204,65 @@ export function materializeReplayTranscriptRuntimeInstructions(
       if (entry.type !== "expect_outbound") return entry;
       const frame = entry.frame;
       if (typeof frame !== "object" || frame === null) return entry;
-      if (
-        runtime.driver === "cursor" &&
-        "type" in frame &&
-        frame.type === "run.start" &&
-        "message" in frame &&
-        typeof frame.message === "string"
-      ) {
-        return frame.message.endsWith(instructions)
-          ? entry
-          : { ...entry, frame: { ...frame, message: `${frame.message}\n\n${instructions}` } };
+      if (runtime.driver === "cursor" && "type" in frame) {
+        if (frame.type === "agent.close") {
+          deliveredNotes.clear();
+          cursorAgentId = undefined;
+          interruptedCursorNotes = undefined;
+          pendingCursorRun = undefined;
+          return entry;
+        }
+        if (frame.type === "run.resume") {
+          pendingCursorRun = {
+            notes:
+              interruptedCursorNotes !== undefined &&
+              interruptedCursorNotes.agentId === cursorAgentId
+                ? interruptedCursorNotes.notes
+                : undefined,
+            compact: false,
+            compacted: false,
+          };
+          return entry;
+        }
+        if (frame.type === "run.start") {
+          if (
+            ("summarize" in frame && frame.summarize === true) ||
+            ("message" in frame &&
+              typeof frame.message === "string" &&
+              frame.message.trim() === "/compress")
+          ) {
+            deliveredNotes.delete(cursorSessionKey);
+            pendingCursorRun = { notes: undefined, compact: true, compacted: false };
+            return entry;
+          }
+          if ("message" in frame && typeof frame.message === "string") {
+            const options =
+              "options" in frame && isRecord(frame.options) ? frame.options : undefined;
+            const model =
+              isRecord(options?.model) && typeof options.model.id === "string"
+                ? options.model.id
+                : runtime.model;
+            const expected =
+              model === runtime.model ? instructions : buildRuntimeInstructions({ harness, model });
+            const recorded = frame.message.endsWith(expected);
+            const resend = !recorded && deliveredNotes.get(cursorSessionKey) !== expected;
+            interruptedCursorNotes = undefined;
+            pendingCursorRun = {
+              notes: recorded || resend ? expected : undefined,
+              compact: false,
+              compacted: false,
+            };
+            if (!resend) return entry;
+            return {
+              ...entry,
+              frame: {
+                ...frame,
+                message: frame.message.length === 0 ? expected : `${frame.message}\n\n${expected}`,
+              },
+            };
+          }
+        }
+        return entry;
       }
       if (
         "method" in frame &&
@@ -193,27 +327,26 @@ export function materializeReplayTranscriptRuntimeInstructions(
         }
         const lastText = promptPartText(prompt.at(-1));
         const expected = notesFor(promptSessionId);
-        // A recording that switched models mid-thread already carries the
-        // instructions for the model each prompt ran on.
-        const recordedNotes =
-          lastText === expected || lastText?.startsWith("<runtime_info>") === true
-            ? lastText
-            : undefined;
-        const resend =
-          recordedNotes === undefined && deliveredNotes.get(promptSessionId) !== expected;
+        const recordedNotes = lastText?.startsWith("<runtime_info>") === true;
+        const sendsNotes = recordedNotes || deliveredNotes.get(promptSessionId) !== expected;
         pendingPrompt = {
           sessionId: promptSessionId,
-          // Recorders normalize the notes they keep, so a recorded block stands for this model's.
-          notes: recordedNotes !== undefined || resend ? expected : undefined,
+          notes: sendsNotes ? expected : undefined,
           compact: false,
           compactionsAtSend: compactionCounts.get(promptSessionId) ?? 0,
         };
-        if (!resend) return entry;
+        if (!sendsNotes || lastText === expected) return entry;
         return {
           ...entry,
           frame: {
             ...frame,
-            params: { ...frame.params, prompt: [...prompt, { type: "text", text: expected }] },
+            params: {
+              ...frame.params,
+              prompt: [
+                ...(recordedNotes ? prompt.slice(0, -1) : prompt),
+                { type: "text", text: expected },
+              ],
+            },
           },
         };
       }
@@ -235,8 +368,11 @@ function promptPartText(part: unknown): string | undefined {
 
 type ReplayFrame = {
   readonly kind?: unknown;
+  readonly type?: unknown;
+  readonly agentId?: unknown;
   readonly method?: unknown;
   readonly params?: unknown;
+  readonly update?: unknown;
   readonly result?: unknown;
   readonly error?: unknown;
 };

@@ -1,16 +1,17 @@
+import { keepLeadingWhitespace, keepsLeadingWhitespace } from "./markdownLeadingWhitespace.ts";
 import { keepOrderedListNumbers, keepsOrderedListNumbers } from "./markdownOrderedListNumbers.ts";
 
 interface MarkdownPosition {
   readonly start?: {
     readonly line?: number;
-    readonly offset?: number;
+    readonly offset?: number | undefined;
   };
 }
 
 interface MarkdownAstNode {
   readonly type: string;
   readonly value?: unknown;
-  readonly position?: MarkdownPosition;
+  readonly position?: MarkdownPosition | undefined;
   children?: MarkdownAstNode[];
 }
 
@@ -27,9 +28,9 @@ interface RecoveredMarkdown {
   readonly source: string;
 }
 
-const INLINE_PARSE_PREFIX = "t3-markdown-inline-prefix:";
+export const INLINE_PARSE_PREFIX = "t3-markdown-inline-prefix:";
 
-function isSameLineOverIndentedCode(
+export function isSameLineOverIndentedCode(
   node: MarkdownAstNode,
   parent: MarkdownAstNode | undefined,
   markdown: string,
@@ -95,6 +96,15 @@ function blocksFromIndentedCode(node: MarkdownAstNode, parser: MarkdownParser): 
   const recovered = parseRecoveredMarkdown(value, parser);
   if (keepsOrderedListNumbers(parser)) {
     for (const block of recovered.blocks) keepOrderedListNumbers(block, recovered.source);
+  }
+  if (keepsLeadingWhitespace(parser)) {
+    // The trimmed first line sets where the item's content starts.
+    const indent = /^[\t ]*/.exec(String(node.value))![0];
+    const columns = [...indent].reduce(
+      (column, character) => (character === "\t" ? (Math.floor(column / 4) + 1) * 4 : column + 1),
+      0,
+    );
+    keepLeadingWhitespace({ type: "root", children: recovered.blocks }, recovered.source, columns);
   }
   const first = recovered.blocks[0];
   return {

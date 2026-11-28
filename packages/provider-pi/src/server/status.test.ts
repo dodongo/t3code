@@ -12,7 +12,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { checkPiProviderStatus, MINIMUM_PI_VERSION } from "./status.ts";
+import { checkPiProviderStatus } from "./status.ts";
 
 const encoder = new TextEncoder();
 const decodeRpcRequest = Schema.decodeSync(
@@ -174,15 +174,24 @@ const settings = {
   customModels: [],
 } as const;
 
+const BROKEN_ADVISORY = {
+  status: "broken",
+  message: null,
+  recommendedVersion: null,
+  recommendedRange: ">=1.0.0",
+} as const;
+
 describe("PiProvider", () => {
-  it.effect("requires session-scoped thinking changes", () =>
+  it.effect("reports a version the policy rates broken as an error", () =>
     Effect.gen(function* () {
-      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+      const snapshot = yield* checkPiProviderStatus(settings, undefined, undefined, () =>
+        Effect.succeed(BROKEN_ADVISORY),
+      ).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.84.2")),
       );
       assert.equal(snapshot.status, "error");
       assert.equal(snapshot.version, "0.84.2");
-      assert.include(snapshot.message ?? "", `Pi ${MINIMUM_PI_VERSION} or newer`);
+      assert.include(snapshot.message ?? "", "Pi 0.84.2 does not work");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -284,7 +293,7 @@ describe("PiProvider", () => {
     {
       label: "an uncatalogued model id of a provider with credentials",
       version: "1.4.0",
-      activeModel: { provider: "anthropic", id: "claude-next" },
+      activeModel: { provider: "acme", id: "acme-next" },
       authCheck: undefined,
       message: undefined,
     },
@@ -300,7 +309,7 @@ describe("PiProvider", () => {
       const spawner = yield* piDiscoverySpawner(
         {
           models: [
-            { provider: "anthropic", id: "claude-sonnet-4" },
+            { provider: "acme", id: "acme-sonnet-4" },
             { provider: "router", id: "auto" },
           ],
         },
@@ -319,16 +328,52 @@ describe("PiProvider", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each([
+    { activeModel: { provider: "acme", id: "acme-sonnet-4" }, offersDefault: true },
+    {
+      activeModel: { provider: "amazon-bedrock", id: "us.anthropic.claude-opus-5-5" },
+      offersDefault: false,
+    },
+    { activeModel: { provider: "google", id: "gemini-3-pro" }, offersDefault: false },
+  ])(
+    "lists no Anthropic or Gemini model, so Claude and Antigravity run them ($activeModel.id)",
+    ({ activeModel, offersDefault }) =>
+      Effect.gen(function* () {
+        const spawner = yield* piDiscoverySpawner(
+          {
+            models: [
+              { provider: "acme", id: "acme-sonnet-4" },
+              { provider: "anthropic", id: "claude-sonnet-5" },
+              { provider: "amazon-bedrock", id: "us.anthropic.claude-opus-5-5" },
+              { provider: "openrouter", id: "anthropic/claude-haiku-5-5" },
+              { provider: "google", id: "gemini-3-pro" },
+              { provider: "openrouter", id: "google/gemini-3-flash" },
+            ],
+          },
+          undefined,
+          Effect.void,
+          { state: { model: activeModel } },
+        );
+        const snapshot = yield* checkPiProviderStatus(settings).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        assert.deepEqual(
+          snapshot.models.map((model) => model.slug),
+          [...(offersDefault ? ["default"] : []), "acme/acme-sonnet-4"],
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("marks models that only load with Pi extensions as unusable for text generation", () =>
     Effect.gen(function* () {
       const spawner = yield* piDiscoverySpawner(
         {
           models: [
-            { provider: "anthropic", id: "claude-sonnet-4" },
+            { provider: "acme", id: "acme-sonnet-4" },
             { provider: "demo", id: "demo-model" },
           ],
         },
-        { models: [{ provider: "anthropic", id: "claude-sonnet-4" }] },
+        { models: [{ provider: "acme", id: "acme-sonnet-4" }] },
       );
       const snapshot = yield* checkPiProviderStatus(settings).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -337,7 +382,7 @@ describe("PiProvider", () => {
         snapshot.models.map((model) => [model.slug, model.supportsTextGeneration]),
         [
           ["default", undefined],
-          ["anthropic/claude-sonnet-4", undefined],
+          ["acme/acme-sonnet-4", undefined],
           ["demo/demo-model", false],
         ],
       );
@@ -415,7 +460,7 @@ describe("PiProvider", () => {
               { id: "ultrafast", name: "Ultrafast" },
             ],
           },
-          { provider: "anthropic", id: "claude-sonnet-4", reasoning: true },
+          { provider: "acme", id: "acme-sonnet-4", reasoning: true },
         ],
       });
       const snapshot = yield* checkPiProviderStatus(settings).pipe(
@@ -439,19 +484,19 @@ describe("PiProvider", () => {
         currentValue: "default",
       });
       assert.deepEqual(
-        descriptors("anthropic/claude-sonnet-4").map((descriptor) => descriptor.id),
+        descriptors("acme/acme-sonnet-4").map((descriptor) => descriptor.id),
         ["thinking"],
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.each([
-    { launchArgs: "", startupDialog: true, models: ["default", "anthropic/claude-opus"] },
+    { launchArgs: "", startupDialog: true, models: ["default", "acme/acme-opus"] },
     { launchArgs: "--approve", startupDialog: true, models: ["default"] },
     {
       launchArgs: "",
       startupDialog: false,
-      models: ["default", "anthropic/claude-opus", "project/local-model"],
+      models: ["default", "acme/acme-opus", "project/local-model"],
     },
   ])(
     "keeps project trust unless a startup dialog blocks discovery (dialog: $startupDialog, launch args '$launchArgs')",
@@ -460,7 +505,7 @@ describe("PiProvider", () => {
         const spawner = yield* piDiscoverySpawner(
           {
             models: [
-              { provider: "anthropic", id: "claude-opus" },
+              { provider: "acme", id: "acme-opus" },
               { provider: "project", id: "local-model" },
             ],
           },
@@ -468,7 +513,7 @@ describe("PiProvider", () => {
           undefined,
           {
             startupDialog: row.startupDialog,
-            declinedProjectInventory: { models: [{ provider: "anthropic", id: "claude-opus" }] },
+            declinedProjectInventory: { models: [{ provider: "acme", id: "acme-opus" }] },
           },
         );
         const snapshot = yield* checkPiProviderStatus({
@@ -485,10 +530,10 @@ describe("PiProvider", () => {
   // regression: #18498 a malformed model inventory must not restore stale Pi models
   it.effect.each([
     ["missing models", {}],
-    ["missing model id", { models: [{ provider: "anthropic" }] }],
+    ["missing model id", { models: [{ provider: "acme" }] }],
     [
       "mixed valid and invalid models",
-      { models: [{ provider: "anthropic", id: "claude-sonnet-4" }, { provider: "openrouter" }] },
+      { models: [{ provider: "acme", id: "acme-sonnet-4" }, { provider: "openrouter" }] },
     ],
   ] as const)("reports unknown authentication when Pi discovery returns %s", (_label, inventory) =>
     Effect.gen(function* () {

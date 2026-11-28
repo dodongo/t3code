@@ -28,7 +28,7 @@ const PAGE_RULES =
   "Self-contained: inline <style> and <script>. Local images as absolute paths are inlined. Remote URLs load as-is.";
 
 export const HtmlPreviewTool = Tool.make("html_preview", {
-  description: `Check an HTML page before html_render. Returns PNG, contentHeight, and console output. ${PAGE_RULES} Theme and layout rules are in html_render.`,
+  description: `Check an HTML page before html_render. Returns PNG, contentHeight, and console output. One preview in the active theme is enough when using theme CSS variables. ${PAGE_RULES} Theme and layout rules are in html_render.`,
   parameters: Schema.Struct({
     path: Schema.optional(HtmlPath),
     html: Schema.optional(Html),
@@ -39,12 +39,13 @@ export const HtmlPreviewTool = Tool.make("html_preview", {
     ),
     appearance: Schema.optional(
       Schema.Literals(["dark", "light"]).annotate({
-        description: "Default dark.",
+        description: "Default: active theme.",
       }),
     ),
   }),
   success: Schema.Struct({
     width: Schema.Int,
+    appearance: Schema.Literals(["dark", "light"]),
     contentHeight: Schema.Int,
     capturedHeight: Schema.Int,
     consoleMessages: Schema.Array(
@@ -77,7 +78,7 @@ export const HtmlPreviewTool = Tool.make("html_preview", {
 
 // This affects only the caller's thread, not its workspace, so read-only sandboxes and plan mode may use it.
 const HtmlRenderTool = Tool.make(HTML_RENDER_TOOL_NAME, {
-  description: `Show a finished HTML page (chart, diagram, mockup) inline in this thread, above your final reply. Do not announce or restate the page. Frame fits height to ${HTML_RENDER_MAX_FIT_HEIGHT}px. On mobile, content past the given height scrolls. ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE}`,
+  description: `Show a finished HTML page (chart, diagram, mockup) inline in this thread, above your final reply. Not for an image to post or send elsewhere: write a .png file. Do not announce or restate the page. Frame fits height to ${HTML_RENDER_MAX_FIT_HEIGHT}px. On mobile, content past the given height scrolls. ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE}`,
   parameters: Schema.Struct({
     path: Schema.optional(HtmlPath),
     html: Schema.optional(Html),
@@ -85,9 +86,11 @@ const HtmlRenderTool = Tool.make(HTML_RENDER_TOOL_NAME, {
       Schema.isMinLength(1),
       Schema.isMaxLength(HTML_RENDER_MAX_TITLE_LENGTH),
     ),
-    height: Schema.Int.annotate({
-      description: `Frame height in CSS pixels, ${HTML_RENDER_MIN_HEIGHT} to ${HTML_RENDER_MAX_HEIGHT}. Use the contentHeight from html_preview.`,
-    }),
+    height: Schema.optional(
+      Schema.Int.annotate({
+        description: `Frame height in CSS pixels, ${HTML_RENDER_MIN_HEIGHT} to ${HTML_RENDER_MAX_HEIGHT}. Omit to auto-size, or pass contentHeight from html_preview.`,
+      }),
+    ),
   }),
   success: Schema.Struct({
     htmlRender: Schema.Struct({

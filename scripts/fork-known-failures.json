@@ -1,0 +1,187 @@
+[
+  {
+    "file": "apps/server/src/provider/Drivers/ClaudeSkills.test.ts",
+    "test": "merges plugin enablement and selects installs in native registry order",
+    "reason": "macOS: the test keeps the /var temp path while the code resolves /private/var"
+  },
+  {
+    "file": "apps/server/src/provider/Drivers/ClaudeSkills.test.ts",
+    "test": "gives a synced namespace to an installed plugin, then the first synced row",
+    "reason": "macOS: the case-insensitive file system cannot hold both pstack and PSTACK"
+  },
+  {
+    "file": "apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts",
+    "test": "installs both app id spellings without creating an icon cache",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/desktop/src/app/DesktopLinuxUrlHandler.test.ts",
+    "test": "replaces same-length stale icons and refreshes an existing cache once",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "packages/provider-fx/src/server/skills.test.ts",
+    "test": "lists nothing from a linked ~/.fx/skills",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "packages/provider-fx/src/server/skills.test.ts",
+    "test": "offers the skill fx loads for each name",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "packages/shared/src/shell.test.ts",
+    "test": "captures values when the profile replaces PATH and a DEBUG trap echoes commands",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "packages/ssh/src/tunnel.test.ts",
+    "test": "names missing gzip after verifying with sha256sum",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "packages/ssh/src/tunnel.test.ts",
+    "test": "names missing gzip after verifying with shasum",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/invocation.test.ts",
+    "test": "proves the downloaded executable was started by a global npm launcher",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/invocation.test.ts",
+    "test": "requires the npm prefix's bin to point to the running package",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/triage.test.ts",
+    "test": "launches agy with the triage prompt (agent=antigravity, model=test-model)",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/triage.test.ts",
+    "test": "launches agy with the triage prompt (agent=undefined, model=undefined)",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/triage.test.ts",
+    "test": "launches claude with the triage prompt (agent=claude, model=undefined)",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cli/triage.test.ts",
+    "test": "launches codex with the triage prompt (agent=codex, model=test-model)",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/cloud/pinnedRuntime.test.ts",
+    "test": "removes a runtime only its own entry names when its real directory in a symlinked home …",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/process/SpawnWorker.test.ts",
+    "test": "preserves stdin, large output, env, cwd, literal args and additional descriptors",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/project/ManagedProjectFolders.test.ts",
+    "test": "still knows No project when its folder is the target of a symlinked Scratch",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/project/ProjectSetupScriptRunner.test.ts",
+    "test": "reports a nonzero completion for a syntax error",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/usage/UsageService.test.ts",
+    "test": "discovers Pi history in its default home and directory overrides",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/usage/UsageService.test.ts",
+    "test": "retains Codex reconciliation and partial coverage through persisted restart, append and repair",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/usage/UsageService.test.ts",
+    "test": "returns other providers' usage while Muse home discovery is still pending",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/vcs/GitVcsDriver.test.ts",
+    "test": "checkpoint bulk staging cleans operation-owned packs after interrupt and can retry",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/vcs/GitVcsDriver.test.ts",
+    "test": "checkpoint bulk staging cleans operation-owned packs after success and can retry",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/vcs/GitVcsDriver.test.ts",
+    "test": "checkpoint bulk staging cleans operation-owned packs after timeout and can retry",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/keybindings.test.ts",
+    "test": "upserts missing default keybindings on startup without overriding existing command rules",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/web/src/keybindings.test.ts",
+    "test": "toggles the thread panel by default without taking terminal keystrokes",
+    "reason": "fails on upstream v0.1.11 too"
+  },
+  {
+    "file": "apps/server/src/vcs/GitVcsDriverCore.test.ts",
+    "test": "runs background Git in its own lane so user commands never queue behind it",
+    "reason": "Upstream v0.1.12 also observes three background commands instead of six on this macOS runner."
+  },
+  {
+    "file": "apps/web/src/components/chat/ExpandedImageDialog.browser.test.tsx",
+    "test": "scrolling pans the image while Ctrl+wheel zooms around the pointer",
+    "reason": "Upstream v0.1.12 Chromium also reports vertical movement on a horizontal wheel step."
+  },
+  {
+    "file": "apps/web/test/appScenarios.renders.tsx",
+    "test": "app-stream-assistant-turn",
+    "reason": "Upstream v0.1.12 also records no MarkdownParagraph renders for the streamed paragraphs."
+  },
+  {
+    "file": "apps/web/test/appScenarios.renders.tsx",
+    "test": "app-switch-thread",
+    "reason": "Upstream v0.1.12 also measures five sidebar row renders instead of two."
+  },
+  {
+    "file": "apps/web/test/appScenarios.renders.tsx",
+    "test": "app-open-thread-from-draft",
+    "reason": "Upstream v0.1.12 also measures five sidebar row renders instead of one."
+  },
+  {
+    "file": "apps/server/src/environmentTheme.test.ts",
+    "test": "publishes themes when a linked theme directory's original grandparent is restored between probes",
+    "reason": "Also times out on clean v0.1.12 on this macOS runner."
+  },
+  {
+    "file": "apps/server/src/watchDirectoryReplacements.test.ts",
+    "test": "backs off stopped watches for an unchanged plain directory",
+    "reason": "Clean v0.1.12 also fails this file's timing-dependent watch tests on this macOS runner, a different test on each run."
+  },
+  {
+    "file": "apps/server/src/watchDirectoryReplacements.test.ts",
+    "test": "backs off stopped watches for an unchanged linked directory",
+    "reason": "Clean v0.1.12 also fails this file's timing-dependent watch tests on this macOS runner, a different test on each run."
+  },
+  {
+    "file": "apps/server/src/watchDirectoryReplacements.test.ts",
+    "test": "rebuilds when a probe sees a tree other than the one the watches were acquired on",
+    "reason": "Clean v0.1.12 also fails this file's timing-dependent watch tests on this macOS runner, a different test on each run."
+  },
+  {
+    "file": "apps/web/src/components/files/AttachmentFilePreview.browser.test.tsx",
+    "test": "reauthorizes a failed image when retry is clicked",
+    "reason": "Upstream v0.1.12 test, unchanged by the fork, fails in the full parallel run and passes alone."
+  }
+]

@@ -5,6 +5,7 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
   type Project,
+  type RunId,
   type RuntimeRequestId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -97,6 +98,7 @@ function shouldPublishAgentAwarenessEvent(
     case "thread.metadata-updated":
     case "thread.pull-request-link-updated":
     case "thread.pull-request-synced":
+    case "thread.issue-synced":
     case "thread.settled":
     case "thread.model-selection-updated":
     case "thread.provider-switched":
@@ -123,6 +125,7 @@ function shouldPublishAgentAwarenessEvent(
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "run.background-work-cancelled":
+    case "run.output-submitted":
     case "run-attempt.created":
     case "run-attempt.updated":
     case "node.updated":
@@ -204,6 +207,8 @@ function resolveAgentActivityPublishingStartupState(input: {
 const RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH = 160;
 const REDACTED_RELAY_AGENT_FAILURE_DETAIL = "The agent run failed.";
 const RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+// Nothing else re-queues a thread when the network returns, so a lost terminal state is retried until it lands.
+const RELAY_AGENT_ACTIVITY_STEADY_RETRY_DELAY_MS = 60_000;
 
 function sanitizeRelayAgentActivityState(
   state: RelayAgentActivityState | null,
@@ -475,7 +480,7 @@ export const make = Effect.gen(function* () {
   // Confirm through the same worker so tombstones cannot race live updates; recovery clears the deadline.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
   // Threads whose confirmation holds a completion, so a thread that settles during the hold still alerts.
-  const heldCompletions = new Set<ThreadId>();
+  const heldCompletions = new Map<ThreadId, RunId | null>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
@@ -600,6 +605,8 @@ export const make = Effect.gen(function* () {
       pendingSubagentRequest: yield* currentSubagentRequestFor(threadId),
     });
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state, snapshot.subagentWait);
+    const latestRunId = Option.getOrNull(thread)?.latestRunId ?? null;
+    const holdsLatestCompletion = heldCompletions.get(threadId) === latestRunId;
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
       (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
@@ -610,7 +617,7 @@ export const make = Effect.gen(function* () {
     if (
       publishedStateByThread.get(threadId) === publishIdentity &&
       // A held completion settled after an earlier clear still has to alert.
-      !(snapshot.state === null && heldCompletions.has(threadId))
+      !(snapshot.state === null && holdsLatestCompletion)
     ) {
       // Clear moot deadlines so later transient nulls cannot skip their deferral window.
       publishConfirmDeadlines.delete(threadId);
@@ -628,7 +635,10 @@ export const make = Effect.gen(function* () {
     // alerts on every move into completed.
     const requiresConfirmation = snapshot.state === null || snapshot.state?.phase === "completed";
     if (requiresConfirmation) {
-      if (snapshot.state?.phase === "completed") heldCompletions.add(threadId);
+      if (snapshot.state?.phase === "completed" && !holdsLatestCompletion) {
+        heldCompletions.set(threadId, latestRunId);
+        publishConfirmDeadlines.delete(threadId);
+      }
       const nowMs = (yield* DateTime.now).epochMilliseconds;
       const deadline = publishConfirmDeadlines.get(threadId);
       if (deadline === undefined) {
@@ -657,7 +667,7 @@ export const make = Effect.gen(function* () {
       // on a new window. Only settlement may hide it; queued or silent runs also project to null.
       const unsettled =
         snapshot.state === null &&
-        heldCompletions.has(threadId) &&
+        holdsLatestCompletion &&
         Option.isSome(thread) &&
         thread.value.settledOverride === "settled"
           ? resolveAgentAwarenessRelayPublishSnapshot({
@@ -819,11 +829,15 @@ export const make = Effect.gen(function* () {
 
   schedulePublishRetry = Effect.fnUntraced(function* (threadId: ThreadId) {
     const attempts = publishRetries.get(threadId)?.attempts ?? 0;
-    const delayMs = RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS[attempts];
-    if (delayMs === undefined) {
-      // Retain exhausted budgets until activity or success resets them; old timers must not restart retries.
-      yield* Effect.logWarning("agent activity publish retry budget exhausted", { threadId });
-      return;
+    const delayMs =
+      RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS[attempts] ?? RELAY_AGENT_ACTIVITY_STEADY_RETRY_DELAY_MS;
+    if (attempts === RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS.length) {
+      yield* Effect.logWarning(
+        "agent activity publish retry budget exhausted; retrying every minute",
+        {
+          threadId,
+        },
+      );
     }
     const retry = {
       attempts: attempts + 1,

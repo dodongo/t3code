@@ -5,6 +5,7 @@ import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
 export interface KeyedLock<Key> {
+  readonly acquireScoped: (key: Key) => Effect.Effect<void, never, Scope.Scope>;
   readonly withLock: <A, E, R>(key: Key, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
   readonly activeKeys: Effect.Effect<ReadonlyArray<Key>>;
 }
@@ -47,6 +48,10 @@ export const make = Effect.fn("KeyedLock.make")(function* <Key>(): Effect.fn.Ret
     });
 
   return {
+    acquireScoped: (key) =>
+      Effect.acquireRelease(acquire(key), () => release(key)).pipe(
+        Effect.flatMap((semaphore) => semaphore.takeScoped(1)),
+      ),
     withLock: (key, effect) =>
       Effect.acquireUseRelease(
         acquire(key),

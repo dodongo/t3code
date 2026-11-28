@@ -1,7 +1,11 @@
-import { VoiceTranscriptionDestination } from "@t3tools/contracts";
+import type { EnvironmentCatalogState } from "@t3tools/client-runtime/state/connections";
+import { EnvironmentId, VoiceTranscriptionDestination } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useSyncExternalStore } from "react";
+import { environmentCatalog } from "../connection/catalog";
 import { randomUUID } from "../lib/utils";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { hostEnvironmentIdAtom } from "../state/primaryEnvironment";
 import {
   getLocalStorageItem,
   readLocalStorageValue,
@@ -13,7 +17,13 @@ import {
 // Separate keys: a stale window saving ordinary preferences must not restore either grant.
 const AUDIO_KEY = "t3code:voice-audio-grant:v1";
 const CLEANUP_KEY = "t3code:voice-cleanup-grant:v1";
-const Grant = Schema.Struct({ id: Schema.String, destination: VoiceTranscriptionDestination });
+// "device" is Apple Speech in the macOS desktop app. Audio stays on this device, so it stays out of the shared contract.
+const AudioDestination = Schema.Union([
+  VoiceTranscriptionDestination,
+  Schema.Struct({ kind: Schema.Literal("device") }),
+]);
+export type AudioDestination = typeof AudioDestination.Type;
+const Grant = Schema.Struct({ id: Schema.String, destination: AudioDestination });
 const AudioGrant = Schema.NullOr(Grant);
 const sameGrant = Schema.toEquivalence(AudioGrant);
 const SavedChoice = Schema.Union([AudioGrant, Schema.Literal("off")]);
@@ -62,8 +72,41 @@ function replaceChoice(choice: AudioChoice, previous = readChoice()) {
     window.localStorage.removeItem(savedKey(old.id));
 }
 
-export function chooseAudioDestination(destination: VoiceTranscriptionDestination | null) {
+export function chooseAudioDestination(destination: AudioDestination | null) {
   replaceChoice(destination ? { id: randomUUID(), destination } : "off");
+}
+
+/**
+ * Sends voice input to this machine's own environment until the person chooses a destination, and
+ * again once the environment they chose is gone, so audio stays on this machine by default.
+ */
+export function adoptHostAudioDestination(host: string | null, catalog: EnvironmentCatalogState) {
+  if (host === null || !catalog.isReady) return;
+  const environmentId = EnvironmentId.make(host);
+  if (!catalog.entries.has(environmentId)) return;
+  const choice = readChoice();
+  if (choice === "off" || pendingGrant(choice)) return;
+  if (choice && !("pending" in choice)) {
+    const { destination } = choice;
+    if (destination.kind === "device" || catalog.entries.has(destination.environmentId)) return;
+  }
+  chooseAudioDestination({ kind: "environment", environmentId });
+}
+
+export function startHostAudioDefault(): () => void {
+  const adopt = () =>
+    adoptHostAudioDestination(
+      appAtomRegistry.get(hostEnvironmentIdAtom),
+      appAtomRegistry.get(environmentCatalog.catalogValueAtom),
+    );
+  const unsubscribes = [
+    appAtomRegistry.subscribe(hostEnvironmentIdAtom, adopt),
+    appAtomRegistry.subscribe(environmentCatalog.catalogValueAtom, adopt),
+  ];
+  adopt();
+  return () => {
+    for (const unsubscribe of unsubscribes) unsubscribe();
+  };
 }
 
 export function pendingCloudAudioChoice(

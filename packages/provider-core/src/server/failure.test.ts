@@ -132,6 +132,16 @@ it("preserves actionable T3 errors wrapped by turn startup", () => {
     });
     assert.equal(makeProviderFailure({ cause: Cause.fail(cause) }).message, error.message);
   }
+  const unanswered = {
+    _tag: "CodexAppServerUnresponsiveError",
+    message: "Codex app-server did not answer turn/start within 2 minutes.",
+  };
+  assert.equal(
+    makeProviderFailure({
+      cause: Cause.fail({ _tag: "ProviderAdapterEventStreamError", cause: unanswered }),
+    }).message,
+    unanswered.message,
+  );
 });
 
 it("names how the provider process exited and the stage it failed in, without its output", () => {
@@ -163,6 +173,16 @@ it("names how the provider process exited and the stage it failed in, without it
     makeProviderFailure({ cause: { _tag: "AcpProcessExitedError", code: 1 } }).message,
     "The provider process exited with code 1. Check the server logs for the provider's output, then retry the turn.",
   );
+  const denied = makeProviderFailure({
+    cause: {
+      _tag: "CodexAppServerProcessExitedError",
+      code: 1,
+      stderr: "Error: Operation not permitted (os error 1) at /Users/private/Desktop",
+    },
+  }).message;
+  assert.include(denied, "The provider process exited with code 1. It was denied access");
+  assert.include(denied, "Files and Folders");
+  assert.notInclude(denied, "/Users/private");
 });
 
 it("tells the user to sign in only when an ACP agent answers auth_required", () => {
@@ -183,12 +203,43 @@ it("tells the user to sign in only when an ACP agent answers auth_required", () 
   assert.isUndefined(knownProviderFailureMessage(sessionOpenFailure(-32603)));
 });
 
+it.each([
+  { skillName: "fixture-plugin:private-skill", source: "plugin or MCP namespace" },
+  { skillName: "mcp__fixture__private-skill", source: "MCP" },
+  { skillName: "missing-skill", source: "unknown" },
+])(
+  "shows a denied Claude skill and its $source source without exposing defect text",
+  ({ skillName, source }) => {
+    const driver = ProviderDriverKind.make("claudeAgent");
+    const cause = new ProviderAdapter.ProviderAdapterOpenSessionError({
+      driver,
+      providerSessionId: ProviderSessionId.make("provider-session:private-id"),
+      cause: new ProviderAdapter.ProviderAdapterProtocolError({
+        driver,
+        detail: "The workspace contains /private/workspace",
+        cause: {
+          _tag: "ClaudeSkillDenyRefusalError",
+          skillName,
+          source,
+          message: "Untrusted message",
+        },
+      }),
+    });
+    assert.equal(
+      makeProviderFailure({ cause: Cause.fail(cause) }).message,
+      `Cannot deny Claude skill "${skillName}" (source: ${source}).`,
+    );
+  },
+);
+
 it("keeps unrecognized reasons and provider text out of category messages", () => {
   for (const cause of [
     "Private launch command",
     { _tag: "ProviderAdapterProtocolError", detail: "Pi model 'private-config' is invalid" },
     { _tag: "ProviderAdapterProtocolError", reason: "private-config" },
     { _tag: "ProviderAdapterProtocolError", reason: "constructor" },
+    { _tag: "ClaudeSkillDenyRefusalError", skillName: "private-skill", source: "/private/config" },
+    { _tag: "ClaudeSkillDenyRefusalError", skillName: "/private/config", source: "unknown" },
     { _tag: "constructor", cause: "private-config" },
     {
       _tag: "CodexAppServerRequestError",
@@ -317,6 +368,28 @@ it("does not serialize arbitrary provider causes", () => {
     code: null,
     retryable: null,
   });
+});
+
+it("keeps only trusted Google account verification URLs on provider failures", () => {
+  const validUrls = [
+    "https://accounts.google.com/v3/signin/continue?plt=fixture&flowName=GlifWebSignIn",
+    "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=fixture",
+  ];
+  for (const url of validUrls) {
+    assert.equal(makeProviderFailure({ verificationUrl: url }).verificationUrl, url);
+  }
+  for (const invalid of [
+    undefined,
+    "",
+    "http://accounts.google.com/v3/signin/continue?plt=fixture",
+    "https://accounts.google.com/v3/signin/continue?",
+    "https://accounts.google.com/logout?continue=https://example.invalid",
+    "https://accounts.google.com.example.invalid/v3/signin/continue?plt=fixture",
+    "https://accounts.google.com/v3/signin/continue?plt=fixture#frag",
+    "https://accounts.google.com/v3/signin/continue?plt=fixture\u0007",
+  ]) {
+    assert.isUndefined(makeProviderFailure({ verificationUrl: invalid }).verificationUrl);
+  }
 });
 
 it.effect("keys terminal failure items by provider turn across retries and fallback paths", () =>

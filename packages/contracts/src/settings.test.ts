@@ -43,6 +43,76 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+describe("delegation profiles", () => {
+  const profile = { model: "openai:review-model", deniedSkills: [], checkout: "shared" };
+
+  it("round-trips optional profile fields in settings and patches", () => {
+    const delegation = {
+      providerByVendor: { openai: "pi" },
+      profiles: {
+        worker: profile,
+        reviewer: {
+          ...profile,
+          providerInstanceId: "pi-reviewer",
+          persistent: true,
+          inheritContext: true,
+        },
+        transient: { ...profile, persistent: false, inheritContext: false },
+      },
+    };
+    expect(encodeServerSettings(decodeServerSettings({ delegation })).delegation).toEqual(
+      delegation,
+    );
+    expect(encodeServerSettingsPatch(decodeServerSettingsPatch({ delegation }))).toEqual({
+      delegation,
+    });
+  });
+
+  it("keeps main profiles that name configured profiles", () => {
+    const delegation = {
+      providerByVendor: {},
+      profiles: { advisor: profile, reviewer: profile },
+      mainProfiles: ["advisor", "reviewer"],
+    };
+    expect(decodeServerSettings({ delegation }).delegation).toEqual(delegation);
+    for (const mainProfiles of [[], ["advisor", "advisor"], ["worker"]]) {
+      const input = { delegation: { ...delegation, mainProfiles } };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    }
+  });
+
+  it("rejects non-boolean profile flags and unknown profile fields", () => {
+    for (const fields of [
+      { persistent: "true" },
+      { persistent: null },
+      { inheritContext: "true" },
+      { inheritContext: null },
+      { persist: true },
+    ]) {
+      const input = {
+        delegation: { providerByVendor: {}, profiles: { advisor: { ...profile, ...fields } } },
+      };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    }
+  });
+
+  it.each(["", "not an instance ID", "a".repeat(65), null])(
+    "rejects an invalid provider instance ID (%s)",
+    (providerInstanceId) => {
+      const input = {
+        delegation: {
+          providerByVendor: {},
+          profiles: { reviewer: { ...profile, providerInstanceId } },
+        },
+      };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    },
+  );
+});
+
 it("drops theme defaults from a client's settings patch", () => {
   expect(
     decodeClientServerSettingsPatch({
@@ -126,6 +196,12 @@ describe("storage cleanup settings", () => {
     expect(() =>
       decodeServerSettingsPatch({ storageCleanup: { worktreeKeepWhen: "unknown" } }),
     ).toThrow();
+  });
+});
+
+describe("ClientSettings terminal close confirmation", () => {
+  it("keeps confirmation enabled for settings without a saved preference", () => {
+    expect(decodeClientSettings({}).confirmTerminalClose).toBe(true);
   });
 });
 

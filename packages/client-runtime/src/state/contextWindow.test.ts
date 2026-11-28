@@ -14,7 +14,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { compactBeforeSendTokens } from "./contextWindow.ts";
+import { compactBeforeSendTokens, deriveSessionCacheHitPercent } from "./contextWindow.ts";
 import type { ThreadStructure } from "./models.ts";
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 
@@ -260,5 +260,97 @@ describe("compactBeforeSendTokens", () => {
     expect(compactBeforeSendTokens(sendInput(overrides as Parameters<typeof sendInput>[0]))).toBe(
       expected ? 293_611 : null,
     );
+  });
+});
+
+describe("deriveSessionCacheHitPercent", () => {
+  it("computes cache reads across only the active provider thread's turns", () => {
+    const active = ProviderThreadId.make("provider-thread-active");
+    const retired = ProviderThreadId.make("provider-thread-retired");
+    expect(deriveSessionCacheHitPercent([], { id: active })).toBeNull();
+    expect(
+      deriveSessionCacheHitPercent(
+        [
+          {
+            providerThreadId: retired,
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "complete",
+              hasSubagents: false,
+              inputTokens: 1000,
+              cachedInputTokens: 1000,
+              outputTokens: 10,
+            },
+          },
+          {
+            providerThreadId: active,
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "complete",
+              hasSubagents: false,
+              inputTokens: 100,
+              cachedInputTokens: 0,
+              outputTokens: 10,
+            },
+          },
+          {
+            providerThreadId: active,
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "complete",
+              hasSubagents: false,
+              inputTokens: 300,
+              cachedInputTokens: 300,
+              outputTokens: 20,
+            },
+          },
+          {
+            providerThreadId: active,
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "unavailable",
+              hasSubagents: false,
+            },
+          },
+        ],
+        { id: active },
+      ),
+    ).toBe(75);
+  });
+
+  it("counts a running turn's latest request before the turn reports its usage", () => {
+    const active = ProviderThreadId.make("provider-thread-active");
+    expect(
+      deriveSessionCacheHitPercent(
+        [
+          {
+            providerThreadId: active,
+            tokenUsage: {
+              usedTokens: 1000,
+              inputTokens: 1000,
+              cachedInputTokens: 900,
+              updatedAt: "2026-11-23T18:46:26.271Z",
+            },
+          },
+        ],
+        { id: active },
+      ),
+    ).toBe(90);
+    expect(
+      deriveSessionCacheHitPercent(
+        [
+          {
+            providerThreadId: active,
+            tokenUsage: { usedTokens: 1000, updatedAt: "2026-11-23T18:46:26.271Z" },
+            turnTokenUsage: {
+              usageScope: "main_agent",
+              usageStatus: "unavailable",
+              hasSubagents: false,
+            },
+          },
+        ],
+        { id: active },
+      ),
+    ).toBeNull();
   });
 });

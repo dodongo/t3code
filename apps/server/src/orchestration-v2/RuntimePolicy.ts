@@ -4,6 +4,8 @@ import {
   ModelSelection,
   OrchestrationV2AppThread,
   ProjectId,
+  OrchestrationV2DeniedSkills,
+  ProviderDriverKind,
   ProviderInstanceId,
   RuntimeMode,
   ThreadId,
@@ -17,7 +19,60 @@ import * as Schema from "effect/Schema";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import type * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+
+export class SkillDenyListUnsupportedError extends Schema.TaggedError<SkillDenyListUnsupportedError>()(
+  "SkillDenyListUnsupportedError",
+  {
+    driver: ProviderDriverKind,
+    deniedSkills: OrchestrationV2DeniedSkills,
+    delegationProfile: OrchestrationV2AppThread.fields.delegationProfile,
+  },
+) {
+  override get message(): string {
+    const profile =
+      this.delegationProfile === undefined
+        ? "Delegated thread"
+        : `Delegation profile "${this.delegationProfile}"`;
+    return `${profile} cannot run on driver ${this.driver} with denied skills: ${this.deniedSkills.join(", ")}.`;
+  }
+}
+
+type SkillPolicy = Pick<OrchestrationV2AppThread, "deniedSkills" | "delegationProfile">;
+
+export function skillDenyListRefusal(
+  adapter: Pick<ProviderAdapter.ProviderAdapterV2["Service"], "driver" | "supportsSkillDenyList">,
+  policy: SkillPolicy,
+): SkillDenyListUnsupportedError | undefined {
+  const { deniedSkills, delegationProfile } = policy;
+  if (
+    !deniedSkills?.length ||
+    adapter.supportsSkillDenyList === true ||
+    adapter.driver === "antigravity"
+  )
+    return;
+  return new SkillDenyListUnsupportedError({
+    driver: adapter.driver,
+    deniedSkills,
+    delegationProfile,
+  });
+}
+
+export const requireSkillDenyListSupport = (
+  adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2["Service"],
+  instanceId: ProviderInstanceId,
+  policy: SkillPolicy,
+) =>
+  !policy.deniedSkills?.length
+    ? Effect.void
+    : adapters.get(instanceId).pipe(
+        Effect.flatMap((adapter) => {
+          const refusal = skillDenyListRefusal(adapter, policy);
+          return refusal === undefined ? Effect.void : Effect.fail(refusal);
+        }),
+      );
 
 export class RuntimePolicyResolveError extends Schema.TaggedError<RuntimePolicyResolveError>()(
   "RuntimePolicyResolveError",
@@ -78,17 +133,7 @@ export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePol
   "t3/orchestration-v2/RuntimePolicy/RuntimePolicyV2",
 ) {}
 
-export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2, {
-  resolve: Effect.fn("RuntimePolicyV2.resolve")(function (input) {
-    return Effect.succeed({
-      runtimeMode: input.thread.runtimeMode,
-      interactionMode: input.thread.interactionMode,
-      cwd: input.thread.worktreePath,
-    });
-  }),
-});
-
-function providerRuntimeMode(
+export function providerRuntimeMode(
   runtimeMode: RuntimeMode,
   supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
 ): RuntimeMode {
@@ -143,10 +188,12 @@ export const layerFromProjectStore: Layer.Layer<
   | ProjectStore.ProjectStoreV2
   | ProviderInstanceRegistry.ProviderInstanceRegistry
   | ServerSettings.ServerSettingsService
+  | WorkspaceFolders.WorkspaceFolders
 > = Layer.effect(
   RuntimePolicyV2,
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
+    const workspaceFolders = yield* WorkspaceFolders.WorkspaceFolders;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     // The same ceiling the orchestrator enforces, fixed for the server's life.
     const { managedPolicy } = yield* ServerSettings.ServerSettingsService;
@@ -184,11 +231,28 @@ export const layerFromProjectStore: Layer.Layer<
               }),
             ),
           ));
+        // The turn can still run in its own cwd, as a single-folder thread does.
+        const workspace = yield* workspaceFolders
+          .forThread({
+            projectId: input.thread.projectId,
+            worktreePath: input.thread.worktreePath,
+          })
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not resolve the thread's tracked folders.", cause).pipe(
+                Effect.as(undefined),
+              ),
+            ),
+          );
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
+          matchProviderSessionCwd: input.thread.matchProviderSessionCwd,
+          deniedSkills: input.thread.deniedSkills ?? [],
+          delegationProfile: input.thread.delegationProfile,
           ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
+          ...(workspace === undefined || workspace.folders.length === 0 ? {} : { workspace }),
         });
       }),
     });

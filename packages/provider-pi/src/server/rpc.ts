@@ -12,6 +12,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { windowsSystem32Path } from "@t3tools/shared/windowsSystem";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   MAX_TOOL_OUTPUT_IMAGES,
@@ -19,6 +20,7 @@ import {
 } from "@t3tools/shared/toolOutput";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import { PI_T3_SESSION_CWD_STATUS_KEY } from "./mcpExtensionSource.ts";
 
 export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   operation: Schema.String,
@@ -85,6 +87,27 @@ export function resolvePiModelSlug(
   return { provider: slug.slice(0, separator), modelId: slug.slice(separator + 1) };
 }
 
+/** T3 Code runs Anthropic models only through Claude and Gemini models only through Antigravity. */
+function piModelOwner(provider: string, modelId: string) {
+  const slug = `${provider}/${modelId}`;
+  if (/anthropic|claude/i.test(slug)) return { family: "Anthropic", provider: "Claude" };
+  if (/gemini/i.test(slug)) return { family: "Gemini", provider: "Antigravity" };
+  return undefined;
+}
+
+/** Whether T3 Code runs this model through another provider, never through Pi. */
+export function isPiExcludedModel(provider: string, modelId: string): boolean {
+  return piModelOwner(provider, modelId) !== undefined;
+}
+
+/** Why a Pi model may not run, when T3 Code runs it through another provider. */
+export function piExcludedModelRefusal(provider: string, modelId: string): string | undefined {
+  const owner = piModelOwner(provider, modelId);
+  if (owner === undefined) return undefined;
+  const article = owner.family === "Anthropic" ? "an" : "a";
+  return `Pi's model ${provider}/${modelId} is ${article} ${owner.family} model. T3 Code runs ${owner.family} models only through ${owner.provider}: start the thread with ${owner.provider}, or choose a non-${owner.family} Pi model.`;
+}
+
 export interface PiRpcSpawnOptions {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
@@ -98,6 +121,7 @@ export interface PiRpcConnection {
     record: PiRpcRecord,
     timeoutMs?: number,
   ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
+  readonly sessionCwd: string | undefined;
   readonly events: Queue.Queue<PiRpcRecord, PiRpcError>;
   readonly exited: Effect.Effect<number, PiRpcError>;
   readonly terminate: Effect.Effect<void>;
@@ -105,6 +129,7 @@ export interface PiRpcConnection {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE = Duration.seconds(1);
+const TERMINATION_POLL_INTERVAL = Duration.millis(20);
 
 interface PendingPiRequest {
   readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
@@ -196,10 +221,14 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
 const terminatePiProcess = Effect.fn("PiRpc.terminatePiProcess")(function* (
   kill: (signal: NodeJS.Signals) => boolean,
   hasExited: () => boolean,
+  groupGone: () => boolean,
 ) {
   if (hasExited()) return;
   if (!kill("SIGTERM")) return;
-  yield* Effect.sleep(TERMINATION_GRACE);
+  yield* Effect.sleep(TERMINATION_POLL_INTERVAL).pipe(
+    Effect.repeat({ until: groupGone }),
+    Effect.timeoutOption(TERMINATION_GRACE),
+  );
   if (hasExited()) return;
   kill("SIGKILL");
 });
@@ -253,17 +282,34 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     }
   };
 
+  // EPERM means a group member is still alive, so only ESRCH ends the SIGTERM grace early.
+  const processGroupGone = (): boolean => {
+    try {
+      signalProcessGroup(Number(child.pid), 0);
+      return false;
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException | undefined)?.code === "ESRCH";
+    }
+  };
+
   // Windows process.kill leaves extension children and pipes alive; taskkill /T reaps the tree.
   const terminateWindowsTree = Effect.gen(function* () {
     if (hasExited()) return;
     const taskkill = yield* spawner.spawn(
-      ChildProcess.make("taskkill", ["/PID", String(child.pid), "/T", "/F"]),
+      ChildProcess.make(windowsSystem32Path(yield* HostProcess.Environment, "taskkill.exe"), [
+        "/PID",
+        String(child.pid),
+        "/T",
+        "/F",
+      ]),
     );
     yield* taskkill.exitCode;
   }).pipe(Effect.scoped, Effect.ignore);
 
   const terminateProcess =
-    platform === "win32" ? terminateWindowsTree : terminatePiProcess(killProcessGroup, hasExited);
+    platform === "win32"
+      ? terminateWindowsTree
+      : terminatePiProcess(killProcessGroup, hasExited, processGroupGone);
 
   // Register teardown immediately after spawn so interrupted setup cannot leak a detached process.
   yield* Scope.addFinalizer(scope, terminateProcess.pipe(Effect.ignore, Effect.uninterruptible));
@@ -274,6 +320,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   const transportDown = yield* Deferred.make<never, PiRpcError>();
   const exitDeferred = yield* Deferred.make<number, PiRpcError>();
   let nextRequestId = 0;
+  let sessionCwd: string | undefined;
 
   const failTransport = Effect.fn("PiRpc.failTransport")(function* (error: PiRpcError) {
     const claimed = yield* Deferred.fail(transportDown, error);
@@ -307,6 +354,14 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           }
           return;
         }
+      }
+      if (
+        record["type"] === "extension_ui_request" &&
+        record["method"] === "setStatus" &&
+        record["statusKey"] === PI_T3_SESSION_CWD_STATUS_KEY
+      ) {
+        sessionCwd = piRecordString(record, "statusText");
+        return;
       }
       yield* Queue.offer(events, record);
     });
@@ -423,6 +478,8 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     record: PiRpcRecord,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Effect.fn.Return<unknown, PiRpcError | PiRpcTimeoutError> {
+    if (record["type"] === "new_session" || record["type"] === "switch_session")
+      sessionCwd = undefined;
     const id = `t3-${nextRequestId++}`;
     const deferred = yield* Deferred.make<unknown, PiRpcError>();
     pendingRequests.set(id, { deferred });
@@ -448,6 +505,9 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   return {
     send,
     request,
+    get sessionCwd() {
+      return sessionCwd;
+    },
     events,
     exited: Deferred.await(exitDeferred),
     terminate: failTransport(

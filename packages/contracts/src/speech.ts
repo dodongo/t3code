@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const CloudSpeechApiKey = TrimmedNonEmptyString.check(
   Schema.isMaxLength(4096),
@@ -204,6 +204,13 @@ export const EnvironmentSpeechModels = Schema.Struct({
 });
 export type EnvironmentSpeechModels = typeof EnvironmentSpeechModels.Type;
 
+export const EnvironmentSpeechModelDownload = Schema.Struct({
+  ...EnvironmentSpeechModels.fields,
+  // Older environments return only the catalog.
+  cancelled: Schema.optionalKey(Schema.Boolean),
+});
+export type EnvironmentSpeechModelDownload = typeof EnvironmentSpeechModelDownload.Type;
+
 export const EnvironmentSpeechModelRequest = Schema.Struct({ modelId: SpeechModelId });
 /** A model file, or a folder to search for them, on the environment's own disk. */
 export const EnvironmentSpeechModelLinkRequest = Schema.Struct({
@@ -286,6 +293,8 @@ export const SpeechTranscriptionOptions = Schema.Struct({
   speechLanguage: SpeechLanguage,
   speechTranslateToEnglish: Schema.Boolean,
   speechCustomWords: SpeechCustomWords,
+  /** Recognition-only terms, such as the project name; never rewrite the transcript. */
+  speechHints: Schema.optionalKey(Schema.Array(SpeechCustomWord).check(Schema.isMaxLength(8))),
   speechRemoveFillerWords: Schema.Boolean,
   /** Preserve this cue for separately consented transcript cleanup. */
   speechCorrectionWord: Schema.optionalKey(SpeechCorrectionCue),
@@ -355,3 +364,22 @@ export const SpeechStreamEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("error"), message: Schema.String }),
 ]);
 export type SpeechStreamEvent = typeof SpeechStreamEvent.Type;
+
+/** One-way voice reads the thread's replies aloud; two-way also sends what the user says. */
+export const VoiceMode = Schema.Literals(["off", "oneWay", "twoWay"]);
+export type VoiceMode = typeof VoiceMode.Type;
+
+/** Voice belongs to one thread of this environment at a time. */
+export const VoiceState = Schema.Struct({
+  mode: VoiceMode,
+  threadId: Schema.NullOr(ThreadId),
+  /** Clients turn voice off in other environments when a newer one turns it on. */
+  setAt: Schema.String.check(Schema.isMaxLength(64)),
+});
+export type VoiceState = typeof VoiceState.Type;
+export const VOICE_OFF: VoiceState = { mode: "off", threadId: null, setAt: "" };
+
+const SPEECH_SYNTHESIS_MAX_CHARS = 2_000;
+export const SpeechSynthesisRequest = Schema.Struct({
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(SPEECH_SYNTHESIS_MAX_CHARS)),
+});

@@ -6,7 +6,11 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
+import {
+  PI_T3_MCP_EXTENSION_SOURCE,
+  PI_T3_SERVICE_TIER_COMMAND,
+  T3_PI_SKILL_POLICY_ENV,
+} from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
 type RequestHook = (
@@ -30,6 +34,7 @@ type InputHook = (
 async function loadHooks(
   commands: ReadonlyArray<SkillCommand> = [],
   argv: ReadonlyArray<string> = [],
+  env: NodeJS.ProcessEnv = {},
 ) {
   const handlers = new Map<string, unknown>();
   const source = NodeModule.stripTypeScriptTypes(
@@ -39,7 +44,8 @@ async function loadHooks(
     ),
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-    process: { env: {}, argv },
+    process: { env, argv },
+    NodeOS,
     NodeFSP,
     NodePath,
     stripFrontmatter: (content: string) => content,
@@ -52,7 +58,19 @@ async function loadHooks(
   return handlers;
 }
 
-describe("Pi orchestration prompt section", () => {
+describe("Pi runtime note", () => {
+  it("adds the note as a prompt section when Pi renders sections", async () => {
+    const bridge = await loadMcpBridge();
+    const hook = bridge.handlers.get("before_agent_start")!;
+    const sections: Record<string, string> = {};
+    const result = await hook(
+      { systemPrompt: "base", systemPromptOptions: { sections } },
+      { ui: { notify: assert.fail } },
+    );
+    assert.isUndefined(result);
+    assert.include(sections.t3_code_runtime, "running in T3 Code through the Pi harness.");
+  });
+
   it.each([
     {
       name: "on Pi builds without prompt sections",
@@ -71,14 +89,14 @@ describe("Pi orchestration prompt section", () => {
         },
       ],
     },
-  ])("appends guidance $name", async ({ events }) => {
+  ])("appends the note $name", async ({ events }) => {
     const bridge = await loadMcpBridge();
     const hook = bridge.handlers.get("before_agent_start")!;
     for (const event of events) {
       const result = await hook(event, { ui: { notify: assert.fail } });
       assert.isDefined(result);
-      assert.isTrue(result!.systemPrompt.startsWith(`${event.systemPrompt}\n\n`));
-      assert.include(result!.systemPrompt, "orchestrator_capabilities");
+      assert.isTrue(result!.systemPrompt.startsWith(`${event.systemPrompt}\n\n<runtime_info>`));
+      assert.include(result!.systemPrompt, "t3-code");
     }
   });
 });
@@ -168,35 +186,43 @@ describe("Pi MCP tool exposure", () => {
     ui: { notify: () => undefined },
   };
 
-  it("keeps orchestration direct and optional bridge tools discoverable on modern Pi", async () => {
-    const bridge = await loadMcpBridge({ modern: true, toolSearchAvailable: true });
+  it("defers every tool and keeps them discoverable on modern Pi", async () => {
+    const bridge = await loadMcpBridge({
+      modern: true,
+      toolSearchAvailable: true,
+      activatesOnRegistration: true,
+    });
     await bridge.handlers.get("session_start")!({ systemPrompt: "" }, discoveryContext);
     const start = bridge.handlers.get("before_agent_start");
     assert.isDefined(start);
     const prompt = await start!({ systemPrompt: "Pi system prompt" }, discoveryContext);
-    assert.include(prompt?.systemPrompt ?? "", "orchestrator_capabilities");
+    assert.notInclude(prompt?.systemPrompt ?? "", "orchestrator_capabilities");
     assert.equal(bridge.servers.length, 0);
     assert.equal(bridge.tools.length, 8);
-    assert.deepEqual(bridge.getActiveTools(), ["read", "tool_search"]);
+    const aliases = [
+      "mcp__t3_code__orchestrator_capabilities",
+      "mcp__t3_code__delegate_task",
+      "mcp__t3_code__task_status",
+      "mcp__t3_code__preview_snapshot",
+    ];
+    assert.sameMembers(bridge.getActiveTools(), ["read", "tool_search", ...aliases]);
+    assert.deepEqual(bridge.declaredTools(), []);
     assert.deepEqual(
       bridge.tools
-        .filter((tool) => tool.exposure !== "hidden")
+        .filter((tool) => tool.name.startsWith("mcp__t3-code__"))
         .map((tool) => [tool.name, tool.exposure]),
       [
-        ["mcp__t3-code__orchestrator_capabilities", "direct"],
-        ["mcp__t3-code__delegate_task", "direct"],
-        ["mcp__t3-code__task_status", "direct"],
+        ["mcp__t3-code__orchestrator_capabilities", "deferred"],
+        ["mcp__t3-code__delegate_task", "deferred"],
+        ["mcp__t3-code__task_status", "deferred"],
         ["mcp__t3-code__preview_snapshot", "deferred"],
       ],
     );
     assert.deepEqual(
-      bridge.tools.filter((tool) => tool.exposure === "hidden").map((tool) => tool.name),
-      [
-        "mcp__t3_code__orchestrator_capabilities",
-        "mcp__t3_code__delegate_task",
-        "mcp__t3_code__task_status",
-        "mcp__t3_code__preview_snapshot",
-      ],
+      bridge.tools
+        .filter((tool) => tool.name.startsWith("mcp__t3_code__"))
+        .map((tool) => [tool.name, tool.exposure]),
+      aliases.map((name) => [name, "model-only"]),
     );
     const result = await bridge.tools
       .find((tool) => tool.name === "mcp__t3-code__preview_snapshot")!
@@ -210,9 +236,11 @@ describe("Pi MCP tool exposure", () => {
       modern: true,
       toolSearchAvailable: true,
       allowsTool: (name) => name !== "mcp__t3-code__delegate_task",
+      activatesOnRegistration: true,
     });
     const event = { systemPrompt: "" };
     await bridge.handlers.get("session_start")!(event, discoveryContext);
+    assert.notInclude(bridge.getActiveTools(), "mcp__t3_code__delegate_task");
     const gatewayContext = { model: { api: "openai-completions" }, ui: { notify: assert.fail } };
     await bridge.handlers.get("model_select")!(event, gatewayContext);
     bridge.restoreActiveTools(["read", "mcp__t3-code__task_status"]);
@@ -232,6 +260,106 @@ describe("Pi MCP tool exposure", () => {
     assert.include(bridge.getActiveTools(), "mcp__t3-code__preview_snapshot");
   });
 
+  it("keeps Pi's canonical MCP tool names callable by the model without declaring them twice", async () => {
+    const bridge = await loadMcpBridge({
+      modern: true,
+      toolSearchAvailable: true,
+      activatesOnRegistration: true,
+    });
+    const canonicalNames = [
+      "mcp__t3_code__orchestrator_capabilities",
+      "mcp__t3_code__delegate_task",
+      "mcp__t3_code__task_status",
+      "mcp__t3_code__preview_snapshot",
+    ];
+    const unreachableCanonicalNames = async () => {
+      const unreachable: string[] = [];
+      for (const name of canonicalNames) {
+        const result = await bridge.callModelTool(name, {});
+        if (result.isError === true) unreachable.push(name);
+      }
+      return unreachable;
+    };
+    const declaredCanonicalNames = () =>
+      bridge.declaredTools().filter((name) => name.startsWith("mcp__t3_code__"));
+    const event = { systemPrompt: "" };
+
+    await bridge.handlers.get("session_start")!(event, discoveryContext);
+    assert.deepEqual(
+      await unreachableCanonicalNames(),
+      [],
+      "model calls to these names fail with Tool not found after session start",
+    );
+    assert.deepEqual(declaredCanonicalNames(), [], "declared twice after session start");
+    assert.equal(bridge.requests.at(-1)?.method, "tools/call");
+
+    bridge.restoreActiveTools([
+      "read",
+      "mcp__t3-code__orchestrator_capabilities",
+      "mcp__t3-code__delegate_task",
+      "mcp__t3-code__task_status",
+    ]);
+    await bridge.handlers.get("session_tree")!(event, discoveryContext);
+    assert.deepEqual(
+      await unreachableCanonicalNames(),
+      [],
+      "model calls to these names fail with Tool not found after an older tree loadout",
+    );
+    assert.deepEqual(declaredCanonicalNames(), [], "declared twice after an older tree loadout");
+    assert.isFalse(
+      bridge.callableTools().some((name) => name.startsWith("mcp__t3_code__")),
+      "aliases duplicate the codemode catalog",
+    );
+
+    bridge.restoreActiveTools(["read", "mcp__t3-code__task_status"]);
+    await bridge.handlers.get("session_tree")!(event, discoveryContext);
+    assert.deepEqual(
+      await unreachableCanonicalNames(),
+      [],
+      "an alias of a deferred tool fails while its tool is not loaded",
+    );
+  });
+
+  it("stops an alias once its direct public tool is switched off", async () => {
+    const bridge = await loadMcpBridge({
+      modern: true,
+      toolSearchAvailable: true,
+      toolSearchDisabled: true,
+      activatesOnRegistration: true,
+    });
+    const event = { systemPrompt: "" };
+    await bridge.handlers.get("session_start")!(event, discoveryContext);
+
+    const requestCount = bridge.requests.length;
+    bridge.restoreActiveTools(
+      bridge.getActiveTools().filter((name) => name !== "mcp__t3-code__delegate_task"),
+    );
+    const late = await bridge.callModelTool("mcp__t3_code__delegate_task", {});
+    assert.isTrue(late.isError, "an alias runs after its public tool was switched off");
+    assert.equal(bridge.requests.length, requestCount);
+
+    bridge.restoreActiveTools(["read", "mcp__t3-code__task_status"]);
+    await bridge.handlers.get("session_tree")!(event, discoveryContext);
+    const unreachable: string[] = [];
+    for (const name of [
+      "mcp__t3_code__orchestrator_capabilities",
+      "mcp__t3_code__delegate_task",
+      "mcp__t3_code__task_status",
+      "mcp__t3_code__preview_snapshot",
+    ]) {
+      if ((await bridge.callModelTool(name, {})).isError === true) unreachable.push(name);
+    }
+    assert.deepEqual(
+      unreachable,
+      [
+        "mcp__t3_code__orchestrator_capabilities",
+        "mcp__t3_code__delegate_task",
+        "mcp__t3_code__preview_snapshot",
+      ],
+      "an alias stays callable while its direct public tool is off",
+    );
+  });
+
   it.each(["legacy Pi", "disabled tool search"])(
     "keeps tool execution available with %s",
     async (mode) => {
@@ -244,11 +372,16 @@ describe("Pi MCP tool exposure", () => {
         const start = bridge.handlers.get("session_start");
         await start!({ systemPrompt: "Pi system prompt" }, discoveryContext);
       }
-      assert.equal(bridge.tools.filter((tool) => tool.exposure !== "hidden").length, 4);
+      const publicTools = bridge.tools.filter((tool) => tool.name.startsWith("mcp__t3-code__"));
+      assert.equal(publicTools.length, 4);
       assert.isTrue(
+        publicTools.every((tool) => tool.exposure === undefined || tool.exposure === "direct"),
+      );
+      assert.deepEqual(
         bridge.tools
-          .filter((tool) => tool.exposure !== "hidden")
-          .every((tool) => tool.exposure === undefined || tool.exposure === "direct"),
+          .filter((tool) => tool.name.startsWith("mcp__t3_code__"))
+          .map((tool) => tool.exposure),
+        mode === "legacy Pi" ? [] : ["model-only", "model-only", "model-only", "model-only"],
       );
       const tool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot");
       assert.isDefined(tool);
@@ -293,6 +426,37 @@ describe("Pi MCP tool schemas", () => {
     for (const tool of bridge.tools) {
       assert.deepEqual(tool.parameters, inputSchema);
     }
+  });
+
+  it("records each T3 schema once on Pi, which keeps hidden alias declarations in the transcript", async () => {
+    const inputSchema = {
+      type: "object",
+      properties: { depth: { type: "number", description: "Snapshot depth" } },
+      required: ["depth"],
+    };
+    const bridge = await loadMcpBridge({
+      modern: true,
+      inputSchema,
+      activatesOnRegistration: true,
+    });
+    await bridge.handlers.get("session_start")!(
+      { systemPrompt: "" },
+      { model: { api: "openai-completions" }, ui: { notify: assert.fail } },
+    );
+    const aliases = bridge.tools.filter((tool) => tool.name.startsWith("mcp__t3_code__"));
+    assert.isAbove(aliases.length, 0);
+    for (const alias of aliases) {
+      const label = alias.name.slice("mcp__t3_code__".length);
+      const publicTool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__" + label)!;
+      assert.deepEqual(publicTool.parameters, inputSchema);
+      assert.deepEqual(alias.parameters, { type: "object", properties: {} });
+      assert.equal(alias.description, "Same as mcp__t3-code__" + label + ".");
+    }
+    await bridge.callModelTool("mcp__t3_code__preview_snapshot", { depth: 2 });
+    assert.deepEqual(JSON.parse(JSON.stringify(bridge.requests.at(-1))).params, {
+      name: "preview_snapshot",
+      arguments: { depth: 2 },
+    });
   });
 });
 
@@ -518,6 +682,58 @@ async function loadInputHook(commands: ReadonlyArray<SkillCommand>) {
 }
 
 describe("Pi skill references", () => {
+  it("ignores denied chips and refuses full-access reads even through symlinks", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-denied-skills-"));
+    try {
+      const deniedDirectory = NodePath.join(directory, "denied");
+      const denied = NodePath.join(deniedDirectory, "SKILL.md");
+      const allowedDirectory = NodePath.join(directory, "denied-neighbor");
+      const allowed = NodePath.join(allowedDirectory, "SKILL.md");
+      const symlink = NodePath.join(directory, "linked.md");
+      const reference = NodePath.join(deniedDirectory, "references", "example.md");
+      await NodeFSP.mkdir(NodePath.dirname(reference), { recursive: true });
+      await NodeFSP.writeFile(reference, "DENIED_REFERENCE");
+      await NodeFSP.mkdir(allowedDirectory);
+      await NodeFSP.writeFile(denied, "DENIED_MARKER");
+      await NodeFSP.writeFile(allowed, "ALLOWED_MARKER");
+      await NodeFSP.symlink(denied, symlink);
+      const handlers = await loadHooks(
+        [
+          { name: "skill:private:denied", source: "skill", sourceInfo: { path: denied } },
+          { name: "skill:allowed", source: "skill", sourceInfo: { path: allowed } },
+        ],
+        [],
+        {
+          [T3_PI_SKILL_POLICY_ENV]: JSON.stringify({
+            deniedNames: ["private:denied"],
+            deniedRoots: [await NodeFSP.realpath(deniedDirectory)],
+            deniedFiles: [await NodeFSP.realpath(denied)],
+          }),
+        },
+      );
+      const result = await (handlers.get("input") as InputHook)(
+        { text: "Use $private:denied and $allowed" },
+        { ui: { notify: assert.fail } },
+      );
+      assert.include(result?.text ?? "", "ALLOWED_MARKER");
+      assert.notInclude(result?.text ?? "", "DENIED_MARKER");
+      const toolCall = handlers.get("tool_call") as (
+        event: { toolName: string; input: { path: string } },
+        ctx: { cwd: string },
+      ) => Promise<{ block: boolean; reason: string } | undefined>;
+      for (const path of [denied, "./denied/SKILL.md", symlink, "@linked.md", reference]) {
+        assert.isTrue(
+          (await toolCall({ toolName: "read", input: { path } }, { cwd: directory }))?.block,
+        );
+      }
+      assert.isUndefined(
+        await toolCall({ toolName: "read", input: { path: allowed } }, { cwd: directory }),
+      );
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true });
+    }
+  });
+
   it("loads every selected skill once while preserving inline prose, whitespace, and images", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-skill-mentions-"));
     try {

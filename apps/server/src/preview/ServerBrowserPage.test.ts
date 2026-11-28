@@ -61,7 +61,6 @@ describe("snapshot deadline diagnostics", () => {
           title: "",
           loading: false,
           visibleText: "",
-          interactiveElements: [],
         }),
         ariaSnapshot: async () => "",
         ...options.page,
@@ -275,6 +274,23 @@ describe("server browser element refs", () => {
   };
   const repeatedRows = `<ul>${Array.from({ length: 5 }, (_, i) => `<li>row ${i + 1}<button data-testid="delete-row" onclick="this.parentElement.remove()">delete</button></li>`).join("")}</ul>`;
 
+  it("does not report an empty interactiveElements list beside a tree full of controls", async () => {
+    await page.setContent(
+      `<a href="#signin">Sign in</a><button>Open menu</button><button>Dismiss local database notice</button>`,
+    );
+    const result = await takeSnapshot();
+    expect(buttonLocator(result.accessibilityTree, "Open menu")).toBeDefined();
+    expect(String(result.accessibilityTree)).toContain('link "Sign in"');
+    const elements = (
+      result as { readonly interactiveElements?: ReadonlyArray<{ readonly name: string }> }
+    ).interactiveElements;
+    if (elements !== undefined) {
+      expect(elements.map((element) => element.name)).toEqual(
+        expect.arrayContaining(["Sign in", "Open menu", "Dismiss local database notice"]),
+      );
+    }
+  });
+
   it("clicks the fifth repeated delete control without touching row one", async () => {
     await page.setContent(repeatedRows);
     const result = await takeSnapshot();
@@ -394,6 +410,36 @@ describe("server browser element refs", () => {
     expect(await inner.inputValue()).toBe("");
   });
 
+  it("types into a field that builds its value from keydown, with and without clear", async () => {
+    await page.setContent(
+      `<input id=a><input id=b><script>for(const f of[a,b]){f.keys="";f.onkeydown=e=>{if(e.key.length===1){e.preventDefault();f.keys+=e.key}}}</script>`,
+    );
+    const keys = (selector: string) =>
+      page.locator(selector).evaluate((field) => (field as unknown as { keys: string }).keys);
+    await ServerBrowserPage.type(page, { locator: "#a", text: "girona42" });
+    expect(await keys("#a")).toBe("girona42");
+    await ServerBrowserPage.type(page, { locator: "#b", text: "girona42", clear: true });
+    expect(await keys("#b")).toBe("girona42");
+    await ServerBrowserPage.type(page, { locator: "#b", text: "a".repeat(501), clear: true });
+    expect(await keys("#b")).toBe(`girona42${"a".repeat(501)}`);
+
+    await page.setContent(
+      `<form onsubmit="event.preventDefault();sent.value='sent'"><label for=e>Email</label><input id=e value=old><input id=d type=date value=2020-02-02><label>Tint <input id=c type=color></label><input id=r type=range><textarea id=t></textarea><input id=sent></form>`,
+    );
+    await ServerBrowserPage.type(page, { locator: "text=Email", text: "a@b.c", clear: true });
+    expect(await page.locator("#e").inputValue()).toBe("a@b.c");
+    await ServerBrowserPage.type(page, { locator: "#d", text: "2026-01-31", clear: true });
+    expect(await page.locator("#d").inputValue()).toBe("2026-01-31");
+    await ServerBrowserPage.type(page, { locator: "text=Tint", text: "#ff0000", clear: true });
+    expect(await page.locator("#c").inputValue()).toBe("#ff0000");
+    await ServerBrowserPage.type(page, { locator: "#r", text: "70", clear: true });
+    expect(await page.locator("#r").inputValue()).toBe("70");
+    await ServerBrowserPage.type(page, { locator: "#e", text: "x\ny" });
+    await ServerBrowserPage.type(page, { locator: "#t", text: "one\r\ntwo" });
+    expect(await page.locator("#t").inputValue()).toBe("one\ntwo");
+    expect(await page.locator("#sent").inputValue()).toBe("");
+  });
+
   it("shows dotted fields as dots wherever their value appears, keeping text values and refs", async () => {
     await page.setContent(`
       <table><tr><td>password:</td><td><input id="pw" type="password" aria-label="Password"></td></tr></table>
@@ -426,6 +472,95 @@ describe("server browser element refs", () => {
     expect(line).toMatch(/: •+$/);
     await ServerBrowserPage.type(page, { locator: locators(line)[0]!, text: "next", clear: true });
     expect(await page.locator("#pw").inputValue()).toBe("next");
+  });
+
+  describe("fill with a value the user typed", () => {
+    const LOGIN = "https://login.example.test";
+    const openLogin = async () => {
+      await page.route(`${LOGIN}/**`, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<form method="post">
+            <input id="email" type="email" aria-label="Email">
+            <input id="pw" type="password" aria-label="Password">
+            <input id="off" type="password" aria-label="Off" disabled>
+          </form>`,
+        }),
+      );
+      await page.goto(`${LOGIN}/signin`);
+    };
+
+    it("checks without typing, then fills a password the snapshot shows only as dots", async () => {
+      await openLogin();
+      const ref = locators(
+        String((await takeSnapshot()).accessibilityTree)
+          .split("\n")
+          .find((line) => line.includes('textbox "Password"')),
+      )[0]!;
+      expect(await ServerBrowserPage.fill(page, { locator: ref, kind: "password" })).toEqual({
+        origin: LOGIN,
+      });
+      expect(await page.locator("#pw").inputValue()).toBe("");
+
+      await ServerBrowserPage.fill(page, {
+        locator: ref,
+        kind: "password",
+        value: " correct horse ",
+        expectedOrigin: LOGIN,
+      });
+      expect(await page.locator("#pw").inputValue()).toBe(" correct horse ");
+      const result = await takeSnapshot();
+      expect(String(result.accessibilityTree)).not.toContain("correct horse");
+      expect(result.visibleText).not.toContain("correct horse");
+    });
+
+    it("refuses a password for a field the page would show in plain text", async () => {
+      await openLogin();
+      await expect(
+        ServerBrowserPage.fill(page, { selector: "#email", kind: "password", value: "pw-value" }),
+      ).rejects.toMatchObject({
+        tag: "PreviewAutomationTargetNotEditableError",
+        message: "The target is not a password field.",
+      });
+      expect(await page.locator("#email").inputValue()).toBe("");
+      await ServerBrowserPage.fill(page, { selector: "#email", kind: "text", value: "a@b.test" });
+      expect(await page.locator("#email").inputValue()).toBe("a@b.test");
+    });
+
+    it("refuses a disabled field and a page on another site, never echoing the value", async () => {
+      await openLogin();
+      const disabled = await ServerBrowserPage.fill(page, {
+        selector: "#off",
+        kind: "password",
+        value: "pw-value",
+      }).catch((error: unknown) => error);
+      expect(disabled).toMatchObject({ tag: "PreviewAutomationTargetNotEditableError" });
+      expect(String((disabled as Error).message)).not.toContain("pw-value");
+
+      const moved = await ServerBrowserPage.fill(page, {
+        selector: "#pw",
+        kind: "password",
+        value: "pw-value",
+        expectedOrigin: "https://elsewhere.example.test",
+      }).catch((error: unknown) => error);
+      expect(moved).toMatchObject({ tag: "PreviewAutomationTargetNotEditableError" });
+      expect(String((moved as Error).message)).not.toContain("pw-value");
+      expect(await page.locator("#pw").inputValue()).toBe("");
+    });
+
+    it("refuses a ref from before the page navigated", async () => {
+      await openLogin();
+      const ref = locators(
+        String((await takeSnapshot()).accessibilityTree)
+          .split("\n")
+          .find((line) => line.includes('textbox "Password"')),
+      )[0]!;
+      await page.goto(`${LOGIN}/again`);
+      await expect(
+        ServerBrowserPage.fill(page, { locator: ref, kind: "password", value: "pw-value" }),
+      ).rejects.toMatchObject({ tag: "PreviewAutomationInvalidSelectorError" });
+      expect(await page.locator("#pw").inputValue()).toBe("");
+    });
   });
 
   it("masks dotted values in page text next to punctuation, with odd spaces, and at the cut", async () => {
@@ -587,6 +722,57 @@ describe("server browser element refs", () => {
       5_000,
     );
     expect(result).toEqual({ clicked: true });
+  });
+
+  it("runScript supports page.route, waitForResponse, and open(url) with automatic cleanup", async () => {
+    const result = await ServerBrowserPage.runScript(
+      page,
+      cdp,
+      {
+        script: `
+          await page.route("http://preview.test/api", (route) =>
+            route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) }),
+          );
+          await page.route("http://preview.test/", (route) =>
+            route.fulfill({ contentType: "text/html", body: "<title>Main</title>" }),
+          );
+          await page.goto("http://preview.test/");
+          const [response] = await Promise.all([
+            page.waitForResponse("http://preview.test/api"),
+            page.evaluate(() => fetch("/api").then((r) => r.json())),
+          ]);
+          const data = await response.json();
+          const second = await open("data:text/html,<title>Second</title>");
+          const secondTitle = await second.title();
+          return { mainTitle: await page.title(), data, secondTitle };
+        `,
+      },
+      10_000,
+    );
+    expect(result).toEqual({
+      mainTitle: "Main",
+      data: { ok: true },
+      secondTitle: "Second",
+    });
+    // Temporary open() tab was closed on exit.
+    expect(context.pages()).toHaveLength(1);
+  });
+
+  it("runScript rejects oversized results, syntax errors, and timeouts", async () => {
+    await expect(
+      ServerBrowserPage.runScript(page, cdp, { script: "return 'x'.repeat(70_000);" }, 5_000),
+    ).rejects.toThrow("limit is 64000");
+    await expect(
+      ServerBrowserPage.runScript(page, cdp, { script: "const = ;" }, 5_000),
+    ).rejects.toThrow();
+    await expect(
+      ServerBrowserPage.runScript(
+        page,
+        cdp,
+        { script: "await new Promise((resolve) => setTimeout(resolve, 5_000));" },
+        50,
+      ),
+    ).rejects.toThrow("did not finish within 50ms");
   });
 });
 
@@ -957,7 +1143,7 @@ describe("server browser type", () => {
     ({
       locator: () => ({ last: () => ({ count: () => new Promise<number>(() => {}) }) }),
       evaluate: focusAnswer,
-      keyboard: { insertText: async (text: string) => void typed.push(text) },
+      keyboard: { type: async (text: string) => void typed.push(text) },
     }) as unknown as Page;
 
   it("types into the focused field when Playwright's utility world never answers", async () => {
@@ -993,6 +1179,30 @@ describe("server browser type", () => {
         tag: "PreviewAutomationTimeoutError",
         detail: { timeoutMs: 300 },
       });
+      expect(typed).toEqual([]);
+
+      // A target whose element is found but whose page then stops answering.
+      const fill = vi.fn(async () => {});
+      const hung = {
+        locator: () => ({ evaluate: () => new Promise(() => {}), fill }),
+        keyboard: { type: async (text: string) => void typed.push(text) },
+      } as unknown as Page;
+      void ServerBrowserPage.type(hung, {
+        locator: "#field",
+        text: "hello",
+        clear: true,
+        timeoutMs: 300,
+      }).then(
+        () => (outcome = "typed"),
+        (error: unknown) => (outcome = error),
+      );
+      outcome = "pending";
+      await vi.advanceTimersByTimeAsync(300);
+      expect(outcome).toMatchObject({
+        tag: "PreviewAutomationTimeoutError",
+        detail: { timeoutMs: 300 },
+      });
+      expect(fill).not.toHaveBeenCalled();
       expect(typed).toEqual([]);
     } finally {
       vi.useRealTimers();

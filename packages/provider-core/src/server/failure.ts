@@ -1,17 +1,21 @@
-import type {
-  NodeId,
-  OrchestrationV2ProviderFailure,
-  OrchestrationV2ProviderFailureClass,
-  OrchestrationV2ProviderRetry,
-  OrchestrationV2TurnItem,
-  ProviderDriverKind,
-  ProviderThreadId,
-  ProviderTurnId,
-  RunId,
-  ThreadId,
+import {
+  GoogleAccountVerificationUrl,
+  type NodeId,
+  type OrchestrationV2ProviderFailure,
+  type OrchestrationV2ProviderFailureClass,
+  type OrchestrationV2ProviderRetry,
+  type OrchestrationV2TurnItem,
+  type ProviderDriverKind,
+  type ProviderThreadId,
+  type ProviderTurnId,
+  type RunId,
+  type ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
+import { SkillName } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 
 import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterFailureReason } from "./ProviderAdapter.ts";
@@ -34,6 +38,26 @@ export class ContextHandoffBackgroundWorkError extends Schema.TaggedError<Contex
     return "The target provider still has background work running. Wait for it to finish or stop it before retrying the handoff.";
   }
 }
+
+export class ClaudeSkillDenyRefusalError extends Schema.TaggedError<ClaudeSkillDenyRefusalError>()(
+  "ClaudeSkillDenyRefusalError",
+  {
+    skillName: SkillName,
+    source: Schema.Literals([
+      "MCP",
+      "plugin or MCP namespace",
+      "skill-directory plugin",
+      "unknown",
+      "unsupported permission path",
+    ]),
+  },
+) {
+  override get message() {
+    return `Cannot deny Claude skill "${this.skillName}" (source: ${this.source}).`;
+  }
+}
+
+const decodeClaudeSkillDenyRefusal = Schema.decodeUnknownOption(ClaudeSkillDenyRefusalError);
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
 const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
@@ -66,6 +90,19 @@ const PROVIDER_FAILURE_CATEGORIES: Partial<
     guidance: "Retry the turn; if it keeps failing, check the provider and server logs.",
   },
 };
+
+// macOS privacy protection (TCC) refuses a CLI the project folder with EPERM.
+const PERMISSION_DENIED_OUTPUT = /\bEPERM\b|Operation not permitted/u;
+
+/**
+ * What to do after a provider CLI exits on its own. Only recognises the
+ * output; the output itself stays out of the message.
+ */
+export function providerProcessExitGuidance(output: unknown): string {
+  return typeof output === "string" && PERMISSION_DENIED_OUTPUT.test(output)
+    ? "It was denied access to a file or folder (EPERM). On macOS, allow T3 Code under System Settings > Privacy & Security > Files and Folders, or move the project out of Desktop, Documents, or Downloads, then retry the turn."
+    : "Check the server logs for the provider's output, then retry the turn.";
+}
 
 // codex_protocol::protocol::validate_thread_goal_objective
 const CODEX_GOAL_VALIDATION_MESSAGE =
@@ -108,6 +145,13 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "ClaudeSkillDenyRefusalError": {
+          const refusal = decodeClaudeSkillDenyRefusal(cause);
+          if (Option.isSome(refusal)) {
+            return { known: refusal.value.message, category: categoryMessage() };
+          }
+          break;
+        }
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "ContextHandoffBackgroundWorkError":
@@ -122,9 +166,12 @@ function curatedCauseMessages(cause: unknown): {
         case "ClaudeSettingsLaunchArgError":
         case "ClaudeMcpRegistrationTimeoutError":
         case "ClaudeCodeRootRefusalError":
+        case "ClaudeCodeStartupExitError":
         case "ClaudeConversationNotFoundError":
         case "CursorModelUnavailableError":
         case "CodexGoalObjectiveTooLongError":
+        case "CodexAppServerUnresponsiveError":
+        case "CodexAppServerRetiredError":
         case "ProviderSetupError":
         case "ProviderAdapterThreadInUseError":
         case "ProviderCompactionUnsupportedError":
@@ -150,11 +197,13 @@ function curatedCauseMessages(cause: unknown): {
           }
           break;
         }
-        case "AcpProcessExitedError": {
+        case "AcpProcessExitedError":
+        case "CodexAppServerProcessExitedError": {
           const exit = `provider process exited${processExitStatus(cause)}`;
           const stage = category === undefined ? `The ${exit}` : `${category.summary}: the ${exit}`;
+          const guidance = providerProcessExitGuidance((cause as Record<string, unknown>).stderr);
           return {
-            known: `${stage}. Check the server logs for the provider's output, then retry the turn.`,
+            known: `${stage}. ${guidance}`,
             category: categoryMessage(),
           };
         }
@@ -282,6 +331,8 @@ function boundedText(value: string, maxLength: number): string {
   return `${redacted.slice(0, end)}…`;
 }
 
+const decodeVerificationUrl = Schema.decodeUnknownOption(GoogleAccountVerificationUrl);
+
 export function makeProviderFailure(input: {
   readonly cause?: unknown;
   readonly message?: string | undefined;
@@ -289,6 +340,7 @@ export function makeProviderFailure(input: {
   readonly class?: OrchestrationV2ProviderFailureClass;
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
+  readonly verificationUrl?: unknown;
 }): OrchestrationV2ProviderFailure {
   const curated = curatedCauseMessages(input.cause);
   const requestTooLarge =
@@ -301,6 +353,7 @@ export function makeProviderFailure(input: {
   const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
   const code =
     rawCode === null ? null : boundedText(rawCode, MAX_PROVIDER_FAILURE_CODE_LENGTH) || null;
+  const verificationUrl = Option.getOrUndefined(decodeVerificationUrl(input.verificationUrl));
 
   return {
     class: input.class ?? "unknown",
@@ -312,10 +365,13 @@ export function makeProviderFailure(input: {
     Number.isFinite(Date.parse(input.resetAt))
       ? { resetAt: DateTime.formatIso(DateTime.makeUnsafe(input.resetAt)) }
       : {}),
+    ...(verificationUrl === undefined ? {} : { verificationUrl }),
   };
 }
 
 export function makeProviderFailureTurnItem(input: {
+  // Defaults to the turn's single failure row.
+  readonly id?: TurnItemId;
   readonly driver: ProviderDriverKind;
   readonly threadId: ThreadId;
   readonly runId: RunId | null;
@@ -329,10 +385,12 @@ export function makeProviderFailureTurnItem(input: {
   readonly occurredAt: DateTime.Utc;
 }): Extract<OrchestrationV2TurnItem, { readonly type: "error" }> {
   return {
-    id: IdAllocator.derive.turnItemFromProviderItem({
-      driver: input.driver,
-      nativeItemId: `terminal-failure:${input.providerTurnId}`,
-    }),
+    id:
+      input.id ??
+      IdAllocator.derive.turnItemFromProviderItem({
+        driver: input.driver,
+        nativeItemId: `terminal-failure:${input.providerTurnId}`,
+      }),
     threadId: input.threadId,
     runId: input.runId,
     nodeId: input.nodeId,
@@ -360,6 +418,7 @@ export function makeProviderFailureTurnItem(input: {
 export const PROVIDER_RETRY_BUDGET_MS = 10 * 60 * 1000;
 
 export function makeProviderRetryTurnItem(input: {
+  readonly id?: TurnItemId;
   readonly driver: ProviderDriverKind;
   readonly threadId: ThreadId;
   readonly runId: RunId | null;
@@ -386,10 +445,12 @@ export function makeProviderRetryTurnItem(input: {
     title = "Provider retry stopped";
   }
   return {
-    id: IdAllocator.derive.turnItemFromProviderItem({
-      driver: input.driver,
-      nativeItemId: `terminal-failure:${input.providerTurnId}`,
-    }),
+    id:
+      input.id ??
+      IdAllocator.derive.turnItemFromProviderItem({
+        driver: input.driver,
+        nativeItemId: `terminal-failure:${input.providerTurnId}`,
+      }),
     threadId: input.threadId,
     runId: input.runId,
     nodeId: input.nodeId,

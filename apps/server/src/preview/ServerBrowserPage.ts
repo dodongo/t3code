@@ -7,9 +7,11 @@ import {
   type PreviewAutomationConsoleEntry,
   type PreviewAutomationDragInput,
   type PreviewAutomationEvaluateInput,
+  type PreviewAutomationFillInput,
   type PreviewAutomationHoverInput,
   type PreviewAutomationNetworkEntry,
   type PreviewAutomationPressInput,
+  type PreviewAutomationScriptInput,
   type PreviewAutomationScrollInput,
   type PreviewAutomationSelectInput,
   type PreviewAutomationSelectResult,
@@ -198,7 +200,6 @@ const SNAPSHOT_SCRIPT = `(() => {
     title: document.title,
     loading: document.readyState !== "complete",
     visibleText: document.body?.innerText || "",
-    interactiveElements: [],
   };
 })()`;
 
@@ -699,10 +700,7 @@ const capture = async (
       "page state",
       () =>
         input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
-          Pick<
-            PreviewAutomationSnapshot,
-            "url" | "title" | "loading" | "visibleText" | "interactiveElements"
-          >
+          Pick<PreviewAutomationSnapshot, "url" | "title" | "loading" | "visibleText">
         >,
     ),
     // A cheap real frame still sizes the screenshot; computing it from metrics drifted from the PNG.
@@ -945,8 +943,8 @@ const focusTextTarget = (target: FocusCandidate | null) => {
   return active != null && (active === element || element.contains(active));
 };
 
-// A `*:focus` locator needs Playwright's utility world, which some desktop tabs never get.
-const focusedTextField = async (page: Page, timeout: number) => {
+// Playwright's own timeout covers finding the element, not a page that stops answering the evaluation.
+const pageAnswer = async <A>(answer: Promise<A>, timeout: number) => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -954,29 +952,77 @@ const focusedTextField = async (page: Page, timeout: number) => {
         reject(
           new ServerBrowserOperationError({
             tag: "PreviewAutomationTimeoutError",
-            message: `The page did not report its focused element within ${timeout}ms, so no text was typed.`,
+            message: `The page did not answer within ${timeout}ms, so no text was typed.`,
             detail: { timeoutMs: timeout },
           }),
         ),
       timeout,
     );
   });
-  return await Promise.race([page.evaluate(focusTextTarget, null), expired]).finally(() =>
-    clearTimeout(timer),
+  return await Promise.race([answer, expired]).finally(() => clearTimeout(timer));
+};
+
+// Serialized into the page's main world, so it must not reference module scope.
+const valueOnlyInput = (
+  target: FocusCandidate & {
+    closest(selector: string): { readonly control: FocusCandidate | null } | null;
+  },
+) => {
+  // As fill does, a target that is not a control stands for its label's control.
+  const element = target.tagName === "INPUT" ? target : target.closest("label")?.control;
+  return (
+    element?.tagName === "INPUT" &&
+    ["color", "date", "datetime-local", "month", "range", "time", "week"].includes(
+      element.type ?? "",
+    )
   );
 };
 
+// Keys reach pages that build their value from keydown. Line breaks stay text: Enter would submit the form.
+const typeKeys = async (page: Page, text: string, timeoutMs: number, deadline: number) => {
+  let typed = 0;
+  for (const [index, part] of text.split(/([\r\n]+)/u).entries()) {
+    // Keys cost about a millisecond each, so long text is sent in pieces that stop at the deadline.
+    const pieces = index % 2 === 1 ? [part] : (part.match(/[^]{1,64}/gu) ?? []);
+    for (const piece of pieces) {
+      if (Date.now() >= deadline) {
+        const reason = `Typing stopped after ${typed} of ${text.length} characters, which the field now holds. Type the rest in another call or raise timeoutMs.`;
+        throw new ServerBrowserOperationError({
+          tag: "PreviewAutomationTimeoutError",
+          message: reason,
+          detail: { timeoutMs, reason },
+        });
+      }
+      if (index % 2 === 1) await page.keyboard.insertText(piece);
+      else await page.keyboard.type(piece);
+      typed += piece.length;
+    }
+  }
+};
+
 export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
-  const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // One deadline across steps keeps the reply inside the broker's grace; Playwright reads 0 as none.
+  const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
   const locator = targetLocator(page, input);
   if (locator !== null && input.clear) {
-    await locator.fill(input.text, { timeout });
+    // Pickers and sliders take a value such as 2026-01-31 only from fill, and some reject an empty one.
+    const timeout = remaining();
+    if (await pageAnswer(locator.evaluate(valueOnlyInput, undefined, { timeout }), timeout)) {
+      await locator.fill(input.text, { timeout: remaining() });
+      return;
+    }
+    // fill follows a label to its control and leaves that control focused for the keys.
+    await locator.fill("", { timeout: remaining() });
+    await typeKeys(page, input.text, timeoutMs, deadline);
     return;
   }
   const focused =
     locator === null
-      ? await focusedTextField(page, timeout)
-      : await locator.evaluate(focusTextTarget, undefined, { timeout });
+      ? // A `*:focus` locator needs Playwright's utility world, which some desktop tabs never get.
+        await pageAnswer(page.evaluate(focusTextTarget, null), remaining())
+      : await locator.evaluate(focusTextTarget, undefined, { timeout: remaining() });
   if (focused !== true) {
     throw new ServerBrowserOperationError({
       tag: "PreviewAutomationTargetNotEditableError",
@@ -987,7 +1033,90 @@ export const type = async (page: Page, input: PreviewAutomationTypeInput) => {
     await page.keyboard.press("ControlOrMeta+A");
     await page.keyboard.press("Delete");
   }
-  await page.keyboard.insertText(input.text);
+  await typeKeys(page, input.text, timeoutMs, deadline);
+};
+
+type FillCandidate = {
+  readonly tagName: string;
+  readonly type?: string;
+  readonly disabled?: boolean;
+  readonly readOnly?: boolean;
+};
+
+// Serialized into the page, so it must not reference module scope.
+const describeFillTarget = (element: FillCandidate) => ({
+  tagName: element.tagName,
+  type: (element.type ?? "").toLowerCase(),
+  disabled: element.disabled === true,
+  readOnly: element.readOnly === true,
+});
+
+const FILL_NON_TEXT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "file",
+  "hidden",
+  "image",
+  "radio",
+  "range",
+  "reset",
+  "submit",
+]);
+
+const fillRefused = (message: string) =>
+  new ServerBrowserOperationError({ tag: "PreviewAutomationTargetNotEditableError", message });
+
+const originOf = (url: string) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "null";
+  }
+};
+
+/**
+ * Checks, and with `value` fills, one field for a value the user typed into a card. Every
+ * error is written here without the value or Playwright's message, so the value cannot reach
+ * a tool result, the action timeline or a log.
+ */
+export const fill = async (
+  page: Page,
+  input: PreviewAutomationFillInput,
+): Promise<{ readonly origin: string }> => {
+  const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const locator = targetLocator(page, input);
+  if (locator === null) throw fillRefused("Name the field with a locator or selector.");
+  const handle = await locator.elementHandle({ timeout });
+  try {
+    // The field's own frame decides where the value goes, not the top page.
+    const frame = await handle.ownerFrame();
+    const origin = originOf(frame?.url() ?? page.url());
+    const field = await handle.evaluate(describeFillTarget);
+    const textControl =
+      field.tagName === "TEXTAREA" ||
+      (field.tagName === "INPUT" && !FILL_NON_TEXT_TYPES.has(field.type || "text"));
+    if (!textControl || field.disabled || field.readOnly) {
+      throw fillRefused("The target is not an enabled text field.");
+    }
+    // A password must land where the page masks it, so snapshots never show it to the agent.
+    if (input.kind === "password" && !(field.tagName === "INPUT" && field.type === "password")) {
+      throw fillRefused("The target is not a password field.");
+    }
+    if (input.expectedOrigin !== undefined && origin !== input.expectedOrigin) {
+      throw fillRefused("The field is now on a different site than the one the user was shown.");
+    }
+    if (input.value !== undefined) {
+      try {
+        await handle.fill(input.value, { timeout });
+      } catch {
+        throw fillRefused("The page did not accept the value.");
+      }
+    }
+    return { origin };
+  } finally {
+    await handle.dispose().catch(constVoid);
+  }
 };
 
 export const hover = async (
@@ -1165,6 +1294,121 @@ export const evaluate = async (
   return value;
 };
 
+export interface PreviewScriptOpenOptions {
+  readonly keep?: boolean;
+}
+
+export interface PreviewScriptHost {
+  readonly openPage: (
+    url: string,
+    options?: PreviewScriptOpenOptions,
+  ) => Promise<{ readonly page: Page; readonly cleanup?: () => Promise<void> }>;
+}
+
+type AsyncScriptFunction = (
+  page: Page,
+  context: ReturnType<Page["context"]>,
+  cdp: CDPSession,
+  open: (url: string, options?: PreviewScriptOpenOptions) => Promise<Page>,
+) => Promise<unknown>;
+
+const AsyncFunctionConstructor = Object.getPrototypeOf(async function () {}).constructor as new (
+  ...args: ReadonlyArray<string>
+) => AsyncScriptFunction;
+
+export const runScript = async (
+  page: Page,
+  cdp: CDPSession,
+  input: PreviewAutomationScriptInput,
+  timeoutMs: number,
+  host?: PreviewScriptHost,
+) => {
+  let compiled: AsyncScriptFunction;
+  try {
+    compiled = new AsyncFunctionConstructor("page", "context", "cdp", "open", input.script);
+  } catch (cause) {
+    throw new ServerBrowserOperationError({
+      tag: "PreviewAutomationExecutionError",
+      message: cause instanceof Error ? cause.message : String(cause),
+    });
+  }
+
+  const temporaryCleanups: Array<() => Promise<void>> = [];
+  const openedPages: Array<Page> = [];
+  const open = async (url: string, options?: PreviewScriptOpenOptions): Promise<Page> => {
+    if (host) {
+      const opened = await host.openPage(url, options);
+      openedPages.push(opened.page);
+      if (opened.cleanup && options?.keep !== true) {
+        temporaryCleanups.push(opened.cleanup);
+      }
+      return opened.page;
+    }
+    const created = await page.context().newPage();
+    openedPages.push(created);
+    if (options?.keep !== true) {
+      temporaryCleanups.push(async () => {
+        if (!created.isClosed()) await created.close().catch(constVoid);
+      });
+    }
+    await created.goto(url, { waitUntil: "domcontentloaded" });
+    return created;
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new ServerBrowserOperationError({
+          tag: "PreviewAutomationTimeoutError",
+          message: `Playwright script did not finish within ${timeoutMs}ms.`,
+        }),
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    const execution = compiled(page, page.context(), cdp, open).catch((cause: unknown) => {
+      if (isServerBrowserOperationError(cause)) throw cause;
+      throw new ServerBrowserOperationError({
+        tag: "PreviewAutomationExecutionError",
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
+    });
+    void execution.catch(constVoid);
+    const rawResult = await Promise.race([execution, expired]);
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(rawResult ?? null);
+    } catch (cause) {
+      throw new ServerBrowserOperationError({
+        tag: "PreviewAutomationExecutionError",
+        message: `Script result is not JSON-serializable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      });
+    }
+    const actualBytes = Buffer.byteLength(serialized, "utf8");
+    if (actualBytes > MAX_EVALUATION_BYTES) {
+      throw new ServerBrowserOperationError({
+        tag: "PreviewAutomationResultTooLargeError",
+        message: `Script result is ${actualBytes} bytes; the limit is ${MAX_EVALUATION_BYTES}.`,
+        detail: { maximumBytes: MAX_EVALUATION_BYTES },
+      });
+    }
+    return JSON.parse(serialized) as unknown;
+  } finally {
+    clearTimeout(timer);
+    await page.unrouteAll({ behavior: "ignoreErrors" }).catch(constVoid);
+    for (const openedPage of openedPages) {
+      if (!openedPage.isClosed()) {
+        await openedPage.unrouteAll({ behavior: "ignoreErrors" }).catch(constVoid);
+      }
+    }
+    for (const cleanup of temporaryCleanups.reverse()) {
+      await cleanup().catch(constVoid);
+    }
+  }
+};
+
 export const waitFor = async (page: Page, input: PreviewAutomationWaitForInput) => {
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const locator = targetLocator(page, input);
@@ -1239,6 +1483,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
   let ring = null;
   const AGENT_CURSOR_PATH = new Path2D("M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z");
   let ringTimer = null;
+  let idleTimer = null;
   let scale = 1;
   let offsetX = 0;
   let offsetY = 0;
@@ -1309,6 +1554,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
             tooLarge = true;
             chunks.length = 0;
             clearInterval(ringTimer);
+            clearInterval(idleTimer);
             frame?.close();
             frame = null;
             if (recorder.state !== "inactive") recorder.stop();
@@ -1318,6 +1564,8 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
           chunks.push(event.data);
         };
         recorder.start(1000);
+        // captureStream only emits on a paint; repainting an idle frame lets the encoder sharpen it.
+        idleTimer = setInterval(paint, 1000 / ${frameRate});
       }
       // Frame px per page CSS px, before fitting into the canvas.
       bitmap.cssScale = bitmap.width / cssWidth;
@@ -1365,6 +1613,7 @@ export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => 
         video.srcObject = null;
         if (recorder.state !== "inactive") recorder.stop();
       }
+      clearInterval(idleTimer);
       await stopped;
       return { mimeType: recorder.mimeType, count: chunks.length, bytes: sizeBytes };
     },

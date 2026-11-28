@@ -22,6 +22,7 @@ const makeFakePi = (
   models?: ReadonlyArray<Record<string, unknown>>,
   version = "0.84.3",
   thinkingError?: string,
+  defaultModel?: Record<string, unknown>,
 ) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
@@ -44,6 +45,8 @@ const makeFakePi = (
             yield* emit({ type: "agent_settled" });
           } else if (record["type"] === "get_last_assistant_text") {
             yield* emit({ ...response, success: true, data: { text: reply } });
+          } else if (record["type"] === "get_state" && defaultModel !== undefined) {
+            yield* emit({ ...response, success: true, data: { model: defaultModel } });
           } else if (record["type"] === "get_available_models" && models !== undefined) {
             yield* emit({ ...response, success: true, data: { models } });
           } else if (record["type"] === "set_model" && setModelError !== undefined) {
@@ -199,6 +202,34 @@ it.effect("reports Pi's turn error when the reply is empty", () =>
   }),
 );
 
+it.effect("reports a provider failure when Pi has already streamed valid commit text", () =>
+  Effect.gen(function* () {
+    const reply = JSON.stringify({ subject: "Update README", body: "" });
+    const result = yield* generateCommitMessage(
+      [
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: reply }],
+            stopReason: "error",
+            errorMessage: "Stream ended without finish_reason",
+          },
+        },
+      ],
+      reply,
+    ).pipe(Effect.result);
+
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.equal(
+        result.failure.detail,
+        "Pi could not generate text: the model provider reported an error.",
+      );
+    }
+  }),
+);
+
 it.effect("keeps Pi's raw error text out of the error", () =>
   Effect.gen(function* () {
     const error = yield* generateCommitMessage([
@@ -253,6 +284,17 @@ it.effect.each([
       const textGeneration = yield* makePiTextGeneration(
         { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
         {},
+        (_driver, detected) =>
+          Effect.succeed(
+            detected === "0.84.2"
+              ? {
+                  status: "broken" as const,
+                  message: null,
+                  recommendedVersion: null,
+                  recommendedRange: ">=1.0.0",
+                }
+              : undefined,
+          ),
       ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
 
       const generation = textGeneration.generateCommitMessage({
@@ -268,7 +310,7 @@ it.effect.each([
       });
       if (version === "0.84.2") {
         const error = yield* generation.pipe(Effect.flip);
-        assert.include(error.detail, "Pi 0.84.3 or newer");
+        assert.include(error.detail, "Pi 0.84.2 does not work");
         assert.deepEqual(pi.received, []);
         return;
       }
@@ -278,7 +320,7 @@ it.effect.each([
       assert.deepEqual(
         pi.received.map((record) => record["type"]),
         [
-          ...(model === "default" ? [] : ["get_available_models", "set_model"]),
+          ...(model === "default" ? ["get_state"] : ["get_available_models", "set_model"]),
           ...(expected === undefined ? [] : ["set_thinking_level"]),
           "prompt",
           "get_last_assistant_text",
@@ -289,6 +331,55 @@ it.effect.each([
         expected,
       );
     }),
+);
+
+it.effect.each([
+  {
+    model: "amazon-bedrock/global.anthropic.claude-haiku-5-5",
+    defaultModel: undefined,
+    refusal: "T3 Code runs Anthropic models only through Claude",
+  },
+  {
+    model: "default",
+    defaultModel: { provider: "anthropic", id: "claude-haiku-5-5" },
+    refusal: "T3 Code runs Anthropic models only through Claude",
+  },
+  {
+    model: "default",
+    defaultModel: { provider: "google", id: "gemini-3-flash" },
+    refusal: "T3 Code runs Gemini models only through Antigravity",
+  },
+])("refuses to generate text with $model ($refusal)", ({ model, defaultModel, refusal }) =>
+  Effect.gen(function* () {
+    const pi = yield* makeFakePi(
+      JSON.stringify({ subject: "Update README", body: "" }),
+      undefined,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      defaultModel,
+    );
+    const textGeneration = yield* makePiTextGeneration(
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+      {},
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
+
+    const error = yield* textGeneration
+      .generateCommitMessage({
+        cwd: process.cwd(),
+        branch: "main",
+        stagedSummary: "M README.md",
+        stagedPatch: "diff --git a/README.md b/README.md",
+        modelSelection: createModelSelection(ProviderInstanceId.make("pi"), model),
+      })
+      .pipe(Effect.flip);
+
+    assert.include(error.detail, refusal);
+    assert.isFalse(
+      pi.received.some((record) => record["type"] === "prompt" || record["type"] === "set_model"),
+    );
+  }),
 );
 
 it.effect("generates at Pi's default level when Pi rejects the saved thinking level", () =>

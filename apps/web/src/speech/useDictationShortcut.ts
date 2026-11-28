@@ -16,7 +16,7 @@ function shouldFinishDictationOnRelease(mode: "auto" | "hold" | "toggle", elapse
 type SpeechActions = {
   available: boolean;
   state: VoiceInputState;
-  start(): Promise<void>;
+  start(): Promise<unknown>;
   stop(): Promise<void>;
   cancel(): void;
 };
@@ -66,7 +66,8 @@ const targetScope = (field: HTMLElement | null | undefined) =>
 // Keys an outside editor (the preview guest) relays arrive on window, so remember their editor.
 const relayedFrom = new WeakMap<Event, symbol>();
 
-// Escape inside another shown dictation editor, or the dialog hosting it, belongs to that editor.
+// Escape inside another shown dictation editor, or the dialog hosting it, belongs to that editor;
+// Escape inside any other dialog belongs to that dialog, so it closes before dictation cancels.
 // The editor itself is checked before dialogs, since one dialog can host several editors.
 function inOtherShortcutTarget(id: symbol, event: Event) {
   const source = relayedFrom.get(event);
@@ -82,7 +83,10 @@ function inOtherShortcutTarget(id: symbol, event: Event) {
     if (scope(own)?.contains(target)) return false;
     if (others.some((field) => scope(field)?.contains(target))) return true;
   }
-  return false;
+  const dialog = (target instanceof Element ? target : target.parentElement)?.closest(
+    '[role="dialog"]',
+  );
+  return !!dialog && !dialog.contains(own ?? null);
 }
 
 export function useDictationShortcut(input: ShortcutInput) {
@@ -101,7 +105,7 @@ export function useDictationShortcut(input: ShortcutInput) {
     modifiers: string[];
     startedAt: number;
     mode: typeof mode;
-    starting: Promise<void>;
+    starting: Promise<unknown>;
   } | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the window keyboard listeners and dictation target registry entry
