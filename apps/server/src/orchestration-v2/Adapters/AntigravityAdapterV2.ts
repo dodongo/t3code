@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type ProviderSetupError,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -19,6 +20,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type { AntigravityAuth } from "../../provider/AntigravityAuth.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
+  ANTIGRAVITY_PROFILE_THINKING_OPTION,
   antigravityPermissionDisposition,
   antigravityPermissionMode,
   antigravityRuntimeModeForSessionMode,
@@ -259,6 +261,7 @@ export function makeAntigravityAcpAdapterFlavor(
     // `agy acp` reads a prompt sent mid-turn as a steer; cancel-and-restart killed its subagents.
     steersWithPrompt: antigravitySteersWithPrompt,
     ...(options.onSessionEvent === undefined ? {} : { onSessionEvent: options.onSessionEvent }),
+    ownedModelOptionIds: [ANTIGRAVITY_PROFILE_THINKING_OPTION],
     applyModelSelection: Effect.fn("AntigravityAdapterV2.applyModelSelection")(function* ({
       runtime,
       modelSelection,
@@ -269,6 +272,10 @@ export function makeAntigravityAcpAdapterFlavor(
         model:
           modelSelection.model === ANTIGRAVITY_DEFAULT_MODEL ? undefined : modelSelection.model,
         defaultModel,
+        profileThinking: getModelSelectionStringOptionValue(
+          modelSelection,
+          ANTIGRAVITY_PROFILE_THINKING_OPTION,
+        ),
         mapError: (cause) => cause,
       });
     }),

@@ -6,7 +6,11 @@ import {
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { applyAntigravityAcpModelSelection } from "../provider/acp/AntigravityAcpSupport.ts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import {
+  ANTIGRAVITY_PROFILE_THINKING_OPTION,
+  applyAntigravityAcpModelSelection,
+} from "../provider/acp/AntigravityAcpSupport.ts";
 import { resolveDelegationModel, resolveDelegationRoute } from "./delegationProfiles.ts";
 
 const antigravityId = ProviderInstanceId.make("agy-work");
@@ -75,47 +79,95 @@ describe("resolveDelegationRoute", () => {
 });
 
 describe("resolveDelegationModel", () => {
-  it.effect.each(["gemini-4-neon", "gemini-4-neon-high"])(
-    "sends the native high-thinking model for cold Antigravity selection %s",
-    (model) =>
+  it.effect.each([
+    { model: "gemini-4-neon", switchModel: true },
+    { model: "gemini-4-neon-high", switchModel: true },
+    { model: "gemini-4-neon-medium", conflict: true },
+    { model: "antigravity-default", switchModel: false },
+  ])(
+    "resolves cold Antigravity selection $model against the live session",
+    ({ model, switchModel, conflict }) =>
       Effect.gen(function* () {
         const selected = yield* resolveDelegationModel({
           provider: { ...antigravity, models: [] },
           model,
           profile: { ...profile, options: { thinking: "high" } },
         });
-        assert.deepEqual(selected, { instanceId: antigravityId, model: "gemini-4-neon-high" });
+        assert.deepEqual(selected, {
+          instanceId: antigravityId,
+          model,
+          options: [{ id: "t3:antigravity-profile-thinking", value: "high" }],
+        });
 
-        const configOptions = [
-          {
-            id: "model",
-            name: "Model",
-            type: "select",
-            currentValue: "gemini-default",
-            options: [
-              { value: "gemini-default", name: "Gemini default" },
-              { value: "gemini-4-neon", name: "Gemini 4 Neon" },
-            ],
-          },
-        ] as const;
         const requests: unknown[] = [];
-        const applied = yield* applyAntigravityAcpModelSelection({
+        let currentModel = "gemini-default";
+        const getConfigOptions = Effect.sync(
+          () =>
+            [
+              {
+                id: "model",
+                name: "Model",
+                type: "select",
+                currentValue: currentModel,
+                options: [
+                  { value: "gemini-default", name: "Gemini default" },
+                  { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+                ],
+              },
+              {
+                id: currentModel === "gemini-default" ? "default_thinking" : "native_neon_thinking",
+                name: "Thinking",
+                type: "select",
+                category: "thought_level",
+                currentValue: "medium",
+                options: [
+                  { value: "medium", name: "Medium" },
+                  { value: "high", name: "High" },
+                ],
+              },
+            ] as const,
+        );
+        const apply = applyAntigravityAcpModelSelection({
           runtime: {
-            getConfigOptions: Effect.succeed(configOptions),
-            setModel: (value) => Effect.sync(() => void requests.push({ value })),
-            setConfigOption: (id, value, options) =>
+            getConfigOptions,
+            setModel: (value) =>
               Effect.sync(() => {
-                requests.push({ id, value, options });
-                return { configOptions };
+                currentModel = value;
+                requests.push({ id: "model", value });
+              }),
+            setConfigOption: (id, value) =>
+              Effect.gen(function* () {
+                requests.push({ id, value });
+                return { configOptions: yield* getConfigOptions };
               }),
           },
           model: selected.model,
+          profileThinking: getModelSelectionStringOptionValue(
+            selected,
+            ANTIGRAVITY_PROFILE_THINKING_OPTION,
+          ),
           mapError: (cause) => cause,
         });
-        assert.equal(applied, "gemini-4-neon");
-        assert.deepEqual(requests, [
-          { id: "model", value: "gemini-4-neon-high", options: { allowUnlistedValue: true } },
-        ]);
+        if (conflict) {
+          const error = yield* apply.pipe(Effect.flip);
+          assert.propertyVal(
+            error,
+            "errorMessage",
+            "Model gemini-4-neon-medium specifies thinking medium, which conflicts with profile thinking high.",
+          );
+          assert.deepEqual(requests, []);
+        } else {
+          assert.equal(yield* apply, switchModel ? "gemini-4-neon" : "gemini-default");
+          assert.deepEqual(
+            requests,
+            switchModel
+              ? [
+                  { id: "model", value: "gemini-4-neon" },
+                  { id: "native_neon_thinking", value: "high" },
+                ]
+              : [{ id: "default_thinking", value: "high" }],
+          );
+        }
       }),
   );
 
