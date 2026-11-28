@@ -129,7 +129,7 @@ export const layer: Layer.Layer<
               .read({ afterSequence: lastSequence, throughSequence, limit: pageSize })
               .pipe(Stream.runCollect);
             for (const stored of page) {
-              yield* projectionStore.apply(stored.event);
+              yield* projectionStore.apply(stored.event, stored.sequence);
               if (stored.event.type === "turn-item.updated") {
                 yield* sql`
                 INSERT INTO orchestration_v2_turn_item_positions (

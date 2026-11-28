@@ -613,6 +613,7 @@ export interface ProjectionStoreV2Shape {
 
   readonly apply: (
     event: OrchestrationV2DomainEvent,
+    sequence?: number,
   ) => Effect.Effect<void, ProjectionStoreV2Error>;
   readonly getPullRequestSnapshot: (options: {
     readonly threadId?: ThreadId;
@@ -2516,7 +2517,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const apply: ProjectionStoreV2Shape["apply"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
-        function* (event) {
+        function* (event, sequence) {
           for (const [key, cached] of timelineIndexes) {
             if (cached.index.threadIds.includes(event.threadId)) timelineIndexes.delete(key);
           }
@@ -3157,7 +3158,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 created_at,
                 updated_at,
                 payload_json,
-                search_text
+                search_text,
+                report_sequence
               )
               VALUES (
                 ${event.payload.id},
@@ -3169,7 +3171,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${createdAt},
                 ${updatedAt},
                 ${payloadJson},
-                ${readableSearchText(event.payload.text)}
+                ${readableSearchText(event.payload.text)},
+                ${event.payload.role === "assistant" ? (sequence ?? null) : null}
               )
               ON CONFLICT(message_id)
               DO UPDATE SET
@@ -3181,7 +3184,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json,
-                search_text = excluded.search_text
+                search_text = excluded.search_text,
+                report_sequence = excluded.report_sequence
             `;
               break;
             }
@@ -3234,7 +3238,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status,
                 updated_at,
                 payload_json,
-                inline_work_output
+                inline_work_output,
+                report_sequence
               )
               VALUES (
                 ${event.payload.id},
@@ -3249,7 +3254,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.status},
                 ${updatedAt},
                 ${payloadJson},
-                ${event.payload.type === "dynamic_tool" && isInlineWorkOutput(payloadJson) ? 1 : 0}
+                ${event.payload.type === "dynamic_tool" && isInlineWorkOutput(payloadJson) ? 1 : 0},
+                ${event.payload.type === "assistant_message" ? (sequence ?? null) : null}
               )
               ON CONFLICT(turn_item_id)
               DO UPDATE SET
@@ -3264,7 +3270,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status = excluded.status,
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json,
-                inline_work_output = excluded.inline_work_output
+                inline_work_output = excluded.inline_work_output,
+                report_sequence = excluded.report_sequence
             `;
               break;
             }
@@ -3843,21 +3850,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               `;
     });
 
-    const reportAfterHandoff = (
-      threadId: ThreadId,
-      taskId: NodeId | undefined,
-      eventType: "message.updated" | "turn-item.updated",
-      idColumn: "message_id" | "turn_item_id",
-    ) =>
+    const reportAfterHandoff = (taskId: NodeId | undefined) =>
       taskId === undefined
         ? sql``
-        : sql`AND ${sql.literal(idColumn)} IN (
-      SELECT json_extract(event.payload_json, '$.id') FROM orchestration_events AS event
-      WHERE event.aggregate_kind = 'thread' AND event.stream_id = ${threadId}
-        AND event.event_type = ${eventType}
-        AND event.sequence > (SELECT MAX(handoff_sequence) FROM orchestration_v2_followup_ownership
-          WHERE owner_task_id = ${taskId})
-    )`;
+        : sql`
+      AND report_sequence > (SELECT MAX(handoff_sequence) FROM orchestration_v2_followup_ownership
+        WHERE owner_task_id = ${taskId})`;
 
     const turnItemMatch = (threadId: ThreadId, filter: ProjectionRecordFilter | undefined) => sql`
       ${threadColumn(filter?.turnItemNodeIds)} = ${threadId}
@@ -3866,7 +3864,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
         ${filter?.turnItemRunId === undefined ? sql`` : sql`AND run_id = ${filter.turnItemRunId}`}
         ${filter?.turnItemNodeIds === undefined ? sql`` : sql`AND node_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemNodeIds)}))`}
-        ${reportAfterHandoff(threadId, filter?.followupReportAfterHandoff, "turn-item.updated", "turn_item_id")}
+        ${reportAfterHandoff(filter?.followupReportAfterHandoff)}
         ${filter?.turnItemRunIds === undefined ? sql`` : sql`AND (run_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRunIds.filter((id): id is RunId => id !== null))})) OR (${filter.turnItemRunIds.includes(null) ? 1 : 0} = 1 AND run_id IS NULL))`}
     `;
 
@@ -4602,7 +4600,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
                   ${filter?.monitorNotificationsOnly === true ? sql`AND json_extract(payload_json, '$.notification.source.kind') = 'monitor'` : sql``}
                   ${filter?.delegatedTaskMessagesOnly === true ? sql`AND ${sql.literal(DELEGATED_TASK_MESSAGE_CONDITION)}` : sql``}
-                  ${reportAfterHandoff(threadId, filter?.followupReportAfterHandoff, "message.updated", "message_id")}
+                  ${reportAfterHandoff(filter?.followupReportAfterHandoff)}
                   ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
                 ORDER BY created_at ASC, message_id ASC
               `

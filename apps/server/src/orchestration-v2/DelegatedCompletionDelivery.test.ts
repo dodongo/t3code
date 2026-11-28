@@ -32,6 +32,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -52,6 +53,7 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
@@ -125,6 +127,7 @@ const layerTestProviderInstanceRegistry = Layer.merge(
 const layerTest = Layer.mergeAll(
   RuntimeLayer.layer,
   RuntimeLayer.layerEventSink,
+  ProjectionMaintenance.layer,
   ThreadCommandExecutor.layer,
   EffectOutbox.layer,
 ).pipe(
@@ -2985,6 +2988,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       "restarted wake",
       "early wake",
       "historical report",
+      "pruned turn item report",
     ])(
       "holds the current follow-up until owned grandchild work returns a report (%s)",
       (scenario) =>
@@ -3429,36 +3433,102 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             reportRun = { ...continued, status: "completed", startedAt: now, completedAt: now };
           }
 
-          yield* eventSink.write({
-            commandId: reconcileCommandId(`followup-grandchild-wake-finished-${scenario}`),
-            events: [
-              ...(scenario === "historical report"
-                ? []
-                : [
-                    {
-                      id: EventId.make(`event:followup-grandchild-wake-result-${scenario}`),
-                      type: "message.updated" as const,
-                      threadId: child.childThreadId,
-                      runId: reportRun.id,
-                      occurredAt: now,
+          const reportCommand = reconcileCommandId(`followup-grandchild-wake-report-${scenario}`);
+          const reportEventId = EventId.make(`event:followup-grandchild-wake-result-${scenario}`);
+          const reportMessageId = MessageId.make(
+            `message:followup-grandchild-wake-result-${scenario}`,
+          );
+          if (scenario !== "historical report") {
+            const scope = {
+              id: reportEventId,
+              threadId: child.childThreadId,
+              runId: reportRun.id,
+              occurredAt: now,
+            };
+            const report = {
+              threadId: child.childThreadId,
+              runId: reportRun.id,
+              nodeId: null,
+              text: "The grandchild finished the next step.",
+              streaming: false,
+              updatedAt: now,
+            };
+            yield* eventSink.write({
+              commandId: reportCommand,
+              events: [
+                scenario === "pruned turn item report"
+                  ? {
+                      ...scope,
+                      type: "turn-item.updated",
                       payload: {
-                        id: MessageId.make(`message:followup-grandchild-wake-result-${scenario}`),
-                        threadId: child.childThreadId,
-                        runId: reportRun.id,
-                        nodeId: null,
-                        role: "assistant" as const,
-                        text: "The grandchild finished the next step.",
+                        ...report,
+                        id: TurnItemId.make("item:pruned-inherited-result"),
+                        type: "assistant_message",
+                        messageId: reportMessageId,
+                        status: "completed",
+                        ordinal: 100,
+                        providerThreadId: null,
+                        providerTurnId: null,
+                        parentItemId: null,
+                        nativeItemRef: null,
+                        startedAt: now,
+                        completedAt: now,
+                        title: null,
+                      },
+                    }
+                  : {
+                      ...scope,
+                      type: "message.updated",
+                      payload: {
+                        ...report,
+                        id: reportMessageId,
+                        role: "assistant",
                         attachments: [],
-                        streaming: false,
-                        createdBy: "agent" as const,
-                        creationSource: "server" as const,
+                        createdBy: "agent",
+                        creationSource: "server",
                         createdAt: now,
-                        updatedAt: now,
                       },
                     },
-                  ]),
-              { ...wakeRun("completed"), runId: reportRun.id, payload: reportRun },
-            ],
+              ],
+            });
+          }
+          if (
+            scenario === "early wake" ||
+            scenario === "historical report" ||
+            scenario === "pruned turn item report"
+          ) {
+            yield* eventSink.write({
+              events: [
+                {
+                  ...wakeRun("running"),
+                  id: EventId.make(`event:prune-inherited-report:${scenario}`),
+                },
+              ],
+            });
+            const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+            yield* TestClock.adjust("2 days");
+            yield* maintenance.pruneEventStore();
+            yield* TestClock.adjust("2 days");
+            yield* maintenance.pruneEventStore();
+            const historical = scenario === "historical report";
+            const retained = yield* eventSink
+              .readByCommandId({
+                commandId: historical
+                  ? reconcileCommandId(`followup-grandchild-settled-${scenario}`)
+                  : reportCommand,
+              })
+              .pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.id === (historical ? "event:historical-inherited-report" : reportEventId),
+                ),
+                Stream.runHead,
+              );
+            assert.isTrue(Option.isNone(retained));
+          }
+          yield* eventSink.write({
+            commandId: reconcileCommandId(`followup-grandchild-wake-finished-${scenario}`),
+            events: [{ ...wakeRun("completed"), runId: reportRun.id, payload: reportRun }],
           });
           yield* orchestrator.recoverDelegatedTasks;
           const settled = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
