@@ -425,7 +425,7 @@ const decodeLegacyProviderSettingsJsonExit = Schema.decodeUnknownExit(LegacyProv
  * A settings file as the server reads it: its settings, or the defaults when the file or its
  * legacy fields are rejected, with the cause. Pure, so the CLI reads files as the server does.
  */
-function decodeSettingsFile(
+export function decodeSettingsFile(
   raw: string,
   managed: ManagedPolicy.ManagedPolicy["Service"]["settings"],
 ) {
