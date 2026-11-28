@@ -51,8 +51,13 @@ describe("delegation profiles", () => {
       providerByVendor: { openai: "pi" },
       profiles: {
         worker: profile,
-        reviewer: { ...profile, providerInstanceId: "pi-reviewer", persistent: true },
-        transient: { ...profile, persistent: false },
+        reviewer: {
+          ...profile,
+          providerInstanceId: "pi-reviewer",
+          persistent: true,
+          inheritContext: true,
+        },
+        transient: { ...profile, persistent: false, inheritContext: false },
       },
     };
     expect(encodeServerSettings(decodeServerSettings({ delegation })).delegation).toEqual(
@@ -77,8 +82,14 @@ describe("delegation profiles", () => {
     }
   });
 
-  it("rejects non-boolean persistence and unknown profile fields", () => {
-    for (const fields of [{ persistent: "true" }, { persistent: null }, { persist: true }]) {
+  it("rejects non-boolean profile flags and unknown profile fields", () => {
+    for (const fields of [
+      { persistent: "true" },
+      { persistent: null },
+      { inheritContext: "true" },
+      { inheritContext: null },
+      { persist: true },
+    ]) {
       const input = {
         delegation: { providerByVendor: {}, profiles: { advisor: { ...profile, ...fields } } },
       };

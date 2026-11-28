@@ -1448,6 +1448,7 @@ const DelegationProfile = rejectUnknownProfileFields(
     deniedSkills: Schema.Array(SkillName).check(Schema.isMaxLength(256), Schema.isUnique()),
     checkout: Schema.Literals(["shared", "worktree"]),
     persistent: Schema.optionalKey(Schema.Boolean),
+    inheritContext: Schema.optionalKey(Schema.Boolean),
     allowedProfiles: Schema.optionalKey(
       Schema.Array(DelegationProfileName).check(Schema.isUnique(), Schema.isMaxLength(256)),
     ),

@@ -436,6 +436,7 @@ export interface OrchestratorV2Shape {
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    delegatedFirstMessage?: string,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly replayDelegatedTask: (input: {
     readonly commandId: CommandId;
@@ -10088,6 +10089,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
       events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
       effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+      delegatedFirstMessage?: string,
     ) {
       const parentProjection = yield* projectionStore
         .getRunProviderRecords(command.parentThreadId, command.parentRunId, command.parentNodeId)
@@ -10309,7 +10311,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         threadId: childThreadId,
         senderThreadId: command.parentThreadId,
         messageId: childMessageId,
-        text: command.task,
+        text: delegatedFirstMessage ?? command.task,
         attachments: [],
         modelSelection: command.modelSelection,
         dispatchMode:
@@ -16034,6 +16036,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId>,
+    delegatedFirstMessage?: string,
   ): Effect.fn.Return<
     {
       readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -16478,7 +16481,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadMergeBack(command, events);
         break;
       case "delegated_task.request":
-        yield* dispatchDelegatedTaskRequest(command, events, effects);
+        yield* dispatchDelegatedTaskRequest(command, events, effects, delegatedFirstMessage);
         break;
       case "delegated_task.remote.request":
         yield* dispatchRemoteDelegatedTaskRequest(command, events);
@@ -16594,6 +16597,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId> = [],
     cancelledTask?: OrchestrationV2Subagent,
+    delegatedFirstMessage?: string,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -16646,7 +16650,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     }
 
-    const plan = yield* dispatchOnce(command, sideChatIds).pipe(
+    const plan = yield* dispatchOnce(command, sideChatIds, delegatedFirstMessage).pipe(
       Effect.tap((planned) => refuseAboveRuntimeModeCeiling(command, planned.events)),
       Effect.filterOrFail(
         (planned) =>
@@ -16882,7 +16886,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+  const dispatchWithReceipt = Effect.fnUntraced(function* (
+    command: OrchestrationV2ServerCommand,
+    delegatedFirstMessage?: string,
+  ) {
     // The latest stable run is the one with a checkpoint. Wait for a just-completed run's capture,
     // outside the locks its commit takes, so a fork right after a turn starts from that turn.
     if (
@@ -16893,7 +16900,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
-      dispatchWithReceiptEffect(command),
+      dispatchWithReceiptEffect(command, [], undefined, delegatedFirstMessage),
     );
     // A fork holds its source's lock, so a source deletion and its fork never interleave. A
     // parent's lock comes before its side chats' locks. A side chat fork from a side chat or a

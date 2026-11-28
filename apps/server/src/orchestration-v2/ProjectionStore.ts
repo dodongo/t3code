@@ -479,7 +479,7 @@ export interface ProjectionTimelinePageOptions {
   readonly beforePosition?: number;
   readonly itemId?: TurnItemId;
   readonly attachmentId?: string;
-  readonly view?: "messages" | "activity";
+  readonly view?: "messages" | "activity" | "delegation";
   readonly limit: number;
 }
 export interface ProjectionTimelinePage {
@@ -8103,17 +8103,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       if (start === undefined) return { matching: [], totalItems, hasEarlier: false };
       const base = yield* local.visibleBefore(start);
       const hiddenAfter = local.hidden.filter((row) => row.ordinal >= start).length;
-      const messagesOnly = options.view !== "activity";
+      const fullActivity = options.view === "activity";
+      const itemTypes =
+        options.view === "delegation"
+          ? sql`AND item.type IN ('user_message', 'assistant_message', 'compaction')`
+          : sql`AND item.type IN ('user_message', 'assistant_message', 'proposed_plan')`;
       const candidates = (yield* local.read(
-        messagesOnly
-          ? sql`AND item.ordinal >= ${start}
-              AND item.type IN ('user_message', 'assistant_message', 'proposed_plan')`
-          : sql`AND item.ordinal >= ${start}`,
+        fullActivity
+          ? sql`AND item.ordinal >= ${start}`
+          : sql`AND item.ordinal >= ${start} ${itemTypes}`,
         sql`LIMIT ${firstPosition - base + Math.min(options.limit, totalItems) + 1 + hiddenAfter}`,
       )).filter(local.isVisible);
       const positions = new Map<string, number>();
       const last = candidates.at(-1);
-      if (messagesOnly && last !== undefined) {
+      if (!fullActivity && last !== undefined) {
         const hiddenIds = new Set(local.hidden.map((row) => row.turn_item_id));
         const span = yield* sql<{ turn_item_id: string }>`
           SELECT turn_item_id FROM orchestration_v2_projection_turn_items
@@ -8126,17 +8129,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       }
       const rows = candidates.map((item, offset) => ({
         ...localTimelineRow(item),
-        position: messagesOnly ? (positions.get(item.id) ?? -1) : base + offset,
+        position: fullActivity ? base + offset : (positions.get(item.id) ?? -1),
       }));
       const matching = rows.filter((row) => row.position > afterPosition);
       // At most `hidden.length` of the first matches before the start are hidden.
       const hasEarlier =
         matching.length < rows.length ||
         (base > 0 &&
-          (!messagesOnly ||
+          (fullActivity ||
             (yield* local.read(
-              sql`AND item.ordinal < ${start}
-                AND item.type IN ('user_message', 'assistant_message', 'proposed_plan')`,
+              sql`AND item.ordinal < ${start} ${itemTypes}`,
               sql`LIMIT ${local.hidden.length + 1}`,
             )).some(local.isVisible)));
       return { matching, totalItems, hasEarlier };
@@ -8224,7 +8226,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 .filter((row) =>
                   options.itemId === undefined
                     ? options.view === "activity" ||
-                      ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type)
+                      (options.view === "delegation"
+                        ? row.sourceThreadId === threadId &&
+                          ["user_message", "assistant_message", "compaction"].includes(
+                            row.item.type,
+                          )
+                        : ["user_message", "assistant_message", "proposed_plan"].includes(
+                            row.item.type,
+                          ))
                     : row.sourceItemId === options.itemId,
                 )
                 .filter(

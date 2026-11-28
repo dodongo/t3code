@@ -150,6 +150,7 @@ import {
 } from "./delegatedTaskModes.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
+import { buildDelegatedFirstMessage } from "./delegatedContext.ts";
 import {
   advertisedModel,
   antigravitySuffixedModel,
@@ -3642,6 +3643,81 @@ const make = Effect.gen(function* () {
                 ),
               ),
             );
+      const task = taskPrompt(input);
+      let delegatedFirstMessage: string | undefined;
+      if ((profiled?.profile ?? callerProfile)?.inheritContext === true) {
+        const callerThreadId = scope.thread.threadId;
+        const newestFirst: string[] = [];
+        let summary: string | null = null;
+        let beforePosition = Number.POSITIVE_INFINITY;
+        while (true) {
+          const page = yield* threadManagement
+            .getTimelinePage(callerThreadId, {
+              beforePosition,
+              view: "delegation",
+              limit: 100,
+            })
+            .pipe(Effect.mapError(threadManagementFailure));
+          const first = page.items[0];
+          if (first === undefined) break;
+          const items = page.items
+            .filter((row) => row.sourceThreadId === callerThreadId)
+            .map((row) => row.item);
+          const summaryIndex = items.findLastIndex(
+            (item) =>
+              item.type === "compaction" && item.status === "completed" && !!item.summary?.trim(),
+          );
+          const summaryItem = items[summaryIndex];
+          if (summaryItem !== undefined) {
+            const text = turnItemText(summaryItem);
+            summary = text === null ? null : withoutWebhookUrlToken(text);
+          }
+          const laterItems = items.slice(summaryIndex + 1);
+          const messageIds = laterItems.flatMap((item) =>
+            item.type === "user_message" || item.type === "assistant_message"
+              ? [item.messageId]
+              : [],
+          );
+          const messages =
+            messageIds.length === 0
+              ? undefined
+              : yield* threadManagement
+                  .getMessagesById(callerThreadId, messageIds)
+                  .pipe(Effect.mapError(threadManagementFailure));
+          for (const item of laterItems.reverse()) {
+            if (item.type !== "user_message" && item.type !== "assistant_message") continue;
+            const message = messages?.get(item.messageId);
+            if (
+              message === undefined ||
+              message.createdBy === "system" ||
+              message.role === "system" ||
+              message.delegatedCompletion !== undefined ||
+              message.notification !== undefined ||
+              message.workflowScript === true ||
+              idleCompactionOf(message) !== undefined ||
+              (message.role === "user" &&
+                message.createdBy !== "user" &&
+                message.senderThreadId === undefined &&
+                message.linkedSender === undefined &&
+                (message.creationSource === "server" || message.creationSource === "provider"))
+            )
+              continue;
+            const text = turnItemText({ ...item, text: message.text });
+            const attachments = message.attachments.map((attachment) =>
+              attachment.type === "image" ? "[Image omitted]" : "[Attachment omitted]",
+            );
+            const body = [text === null ? "" : withoutWebhookUrlToken(text), ...attachments]
+              .filter(Boolean)
+              .join("\n");
+            if (!body) continue;
+            const entry = `${item.type === "user_message" ? "User" : "Assistant"}: ${body}`;
+            newestFirst.push(entry);
+          }
+          if (summaryIndex !== -1 || !page.hasEarlier) break;
+          beforePosition = first.position;
+        }
+        delegatedFirstMessage = buildDelegatedFirstMessage({ task, summary, newestFirst });
+      }
       const parentNodeId = parentRun.rootNodeId;
       // The command commits the child's preparing run, which only this call
       // prepares, so a caller that goes away must not stop it in between.
@@ -3651,32 +3727,35 @@ const make = Effect.gen(function* () {
           // type's own enablement check, using the same command id and its
           // receipt-replay exemption, so no separate assert runs here.
           const dispatch = threadManagement
-            .dispatch({
-              type: "delegated_task.request",
-              createdBy: "agent",
-              creationSource: "mcp",
-              commandId,
-              parentThreadId: scope.thread.threadId,
-              parentRunId: parentRun.id,
-              parentNodeId,
-              task: taskPrompt(input),
-              ...(input.title === undefined ? {} : { title: input.title }),
-              ...(profiled === undefined
-                ? {}
-                : {
-                    delegationProfile: profileName,
-                    deniedSkills: profiled.profile.deniedSkills,
-                  }),
-              modelSelection,
-              runtimeMode,
-              interactionMode,
-              ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-              ...(existingWorkspace === undefined ? {} : { existingWorkspace }),
-              // Async delegations wake the parent on every child terminal; wait
-              // delegations deliver through the blocking tool call until `awaitTask`
-              // gives up the wait (timeout, cancelled call) and upgrades the wake.
-              completionWake: input.mode === "wait" ? "settled_only" : "always",
-            })
+            .dispatch(
+              {
+                type: "delegated_task.request",
+                createdBy: "agent",
+                creationSource: "mcp",
+                commandId,
+                parentThreadId: scope.thread.threadId,
+                parentRunId: parentRun.id,
+                parentNodeId,
+                task,
+                ...(input.title === undefined ? {} : { title: input.title }),
+                ...(profiled === undefined
+                  ? {}
+                  : {
+                      delegationProfile: profileName,
+                      deniedSkills: profiled.profile.deniedSkills,
+                    }),
+                modelSelection,
+                runtimeMode,
+                interactionMode,
+                ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+                ...(existingWorkspace === undefined ? {} : { existingWorkspace }),
+                // Async delegations wake the parent on every child terminal; wait
+                // delegations deliver through the blocking tool call until `awaitTask`
+                // gives up the wait (timeout, cancelled call) and upgrades the wake.
+                completionWake: input.mode === "wait" ? "settled_only" : "always",
+              },
+              delegatedFirstMessage,
+            )
             .pipe(
               Effect.mapError((error) =>
                 error._tag === "ThreadManagementProviderInstanceDisabledError"
