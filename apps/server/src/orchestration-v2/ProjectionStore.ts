@@ -8227,8 +8227,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   options.itemId === undefined
                     ? options.view === "activity" ||
                       (options.view === "delegation"
-                        ? row.sourceThreadId === threadId &&
-                          ["user_message", "assistant_message", "compaction"].includes(
+                        ? ["user_message", "assistant_message", "compaction"].includes(
                             row.item.type,
                           )
                         : ["user_message", "assistant_message", "proposed_plan"].includes(

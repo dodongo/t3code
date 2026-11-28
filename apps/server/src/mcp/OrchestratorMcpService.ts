@@ -150,7 +150,7 @@ import {
 } from "./delegatedTaskModes.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
-import { buildDelegatedFirstMessage } from "./delegatedContext.ts";
+import { buildDelegatedFirstMessage, renderInheritedText } from "./delegatedContext.ts";
 import {
   advertisedModel,
   antigravitySuffixedModel,
@@ -3660,33 +3660,37 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(threadManagementFailure));
           const first = page.items[0];
           if (first === undefined) break;
-          const items = page.items
-            .filter((row) => row.sourceThreadId === callerThreadId)
-            .map((row) => row.item);
-          const summaryIndex = items.findLastIndex(
-            (item) =>
+          const summaryIndex = page.items.findLastIndex(
+            ({ item }) =>
               item.type === "compaction" && item.status === "completed" && !!item.summary?.trim(),
           );
-          const summaryItem = items[summaryIndex];
+          const summaryItem = page.items[summaryIndex]?.item;
           if (summaryItem !== undefined) {
             const text = turnItemText(summaryItem);
-            summary = text === null ? null : withoutWebhookUrlToken(text);
+            summary = text === null ? null : renderInheritedText(text);
           }
-          const laterItems = items.slice(summaryIndex + 1);
-          const messageIds = laterItems.flatMap((item) =>
-            item.type === "user_message" || item.type === "assistant_message"
-              ? [item.messageId]
-              : [],
-          );
-          const messages =
-            messageIds.length === 0
-              ? undefined
-              : yield* threadManagement
-                  .getMessagesById(callerThreadId, messageIds)
-                  .pipe(Effect.mapError(threadManagementFailure));
-          for (const item of laterItems.reverse()) {
+          const laterRows = page.items.slice(summaryIndex + 1);
+          const idsBySource = new Map<ThreadId, MessageId[]>();
+          for (const { item, sourceThreadId } of laterRows) {
             if (item.type !== "user_message" && item.type !== "assistant_message") continue;
-            const message = messages?.get(item.messageId);
+            const ids = idsBySource.get(sourceThreadId) ?? [];
+            ids.push(item.messageId);
+            idsBySource.set(sourceThreadId, ids);
+          }
+          const messagesBySource = new Map(
+            yield* Effect.forEach(
+              idsBySource,
+              ([source, ids]) =>
+                threadManagement.getMessagesById(source, ids).pipe(
+                  Effect.map((messages) => [source, messages] as const),
+                  Effect.mapError(threadManagementFailure),
+                ),
+              { concurrency: 1 },
+            ),
+          );
+          for (const { item, sourceThreadId } of laterRows.reverse()) {
+            if (item.type !== "user_message" && item.type !== "assistant_message") continue;
+            const message = messagesBySource.get(sourceThreadId)?.get(item.messageId);
             if (
               message === undefined ||
               message.createdBy === "system" ||
@@ -3703,12 +3707,7 @@ const make = Effect.gen(function* () {
             )
               continue;
             const text = turnItemText({ ...item, text: message.text });
-            const attachments = message.attachments.map((attachment) =>
-              attachment.type === "image" ? "[Image omitted]" : "[Attachment omitted]",
-            );
-            const body = [text === null ? "" : withoutWebhookUrlToken(text), ...attachments]
-              .filter(Boolean)
-              .join("\n");
+            const body = renderInheritedText(text ?? "", message);
             if (!body) continue;
             const entry = `${item.type === "user_message" ? "User" : "Assistant"}: ${body}`;
             newestFirst.push(entry);

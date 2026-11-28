@@ -69,6 +69,16 @@ describe(buildDelegatedFirstMessage, () => {
     expect(prompt).not.toContain(marker);
   });
 
+  it("returns the exact task when pruning leaves no conversation or summary", () => {
+    expect(
+      buildDelegatedFirstMessage({
+        task: "Act",
+        summary: null,
+        newestFirst: ["x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)],
+      }),
+    ).toBe("Act");
+  });
+
   it("returns the exact task when the whole summary and framing cannot fit", () => {
     expect(
       buildDelegatedFirstMessage({
