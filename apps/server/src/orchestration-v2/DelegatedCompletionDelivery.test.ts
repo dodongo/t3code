@@ -2989,6 +2989,9 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       "early wake",
       "historical report",
       "pruned turn item report",
+      "pruned hook stop",
+      "pruned interrupt result",
+      "pruned error",
     ])(
       "holds the current follow-up until owned grandchild work returns a report (%s)",
       (scenario) =>
@@ -3170,6 +3173,21 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               status,
               now,
             });
+          const resultItem = (runId: RunId) => ({
+            threadId: child.childThreadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            parentItemId: null,
+            nativeItemRef: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            ordinal: 100,
+          });
+          const hookStopId = (runId: RunId) =>
+            IdAllocator.derive.runSignalTurnItem({ runId, signal: PROVIDER_STOP_REASON_SIGNAL });
           const startWake = eventSink.write({
             commandId: reconcileCommandId(`followup-grandchild-settled-${scenario}`),
             events: [
@@ -3237,6 +3255,22 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
                         creationSource: "server" as const,
                         createdAt: now,
                         updatedAt: now,
+                      },
+                    },
+                    {
+                      id: EventId.make("event:historical-inherited-item"),
+                      type: "turn-item.updated" as const,
+                      threadId: child.childThreadId,
+                      runId: wakeRunId,
+                      occurredAt: now,
+                      payload: {
+                        ...resultItem(wakeRunId),
+                        id: hookStopId(wakeRunId),
+                        type: "system_notice" as const,
+                        level: "warning" as const,
+                        status: "completed" as const,
+                        title: null,
+                        message: "Historical item must not be borrowed.",
                       },
                     },
                   ]
@@ -3438,6 +3472,23 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           const reportMessageId = MessageId.make(
             `message:followup-grandchild-wake-result-${scenario}`,
           );
+          const reply = "The grandchild finished the next step.";
+          const stopNotice = "Stopped by the provider hook.";
+          const interruptNotice = "The provider interrupted inherited work.";
+          const failure = "The inherited provider run failed.";
+          const expectedReport =
+            scenario === "pruned error"
+              ? failure
+              : scenario === "pruned hook stop"
+                ? `${reply}\n\n${stopNotice}`
+                : scenario === "pruned interrupt result"
+                  ? `Child task ended with status interrupted.\n\n${interruptNotice}`
+                  : scenario === "historical report"
+                    ? "Child task completed without an assistant result."
+                    : reply;
+          if (scenario === "pruned error") reportRun = { ...reportRun, status: "failed" };
+          if (scenario === "pruned interrupt result")
+            reportRun = { ...reportRun, status: "interrupted" };
           if (scenario !== "historical report") {
             const scope = {
               id: reportEventId,
@@ -3449,53 +3500,114 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               threadId: child.childThreadId,
               runId: reportRun.id,
               nodeId: null,
-              text: "The grandchild finished the next step.",
+              text: reply,
               streaming: false,
               updatedAt: now,
             };
             yield* eventSink.write({
               commandId: reportCommand,
               events: [
+                ...(scenario === "pruned hook stop"
+                  ? [
+                      {
+                        ...scope,
+                        id: EventId.make("event:pruned-hook-reply"),
+                        type: "message.updated" as const,
+                        payload: {
+                          ...report,
+                          id: reportMessageId,
+                          role: "assistant" as const,
+                          attachments: [],
+                          createdBy: "agent" as const,
+                          creationSource: "server" as const,
+                          createdAt: now,
+                        },
+                      },
+                    ]
+                  : []),
                 scenario === "pruned turn item report"
                   ? {
                       ...scope,
                       type: "turn-item.updated",
                       payload: {
-                        ...report,
+                        ...resultItem(reportRun.id),
                         id: TurnItemId.make("item:pruned-inherited-result"),
                         type: "assistant_message",
                         messageId: reportMessageId,
                         status: "completed",
-                        ordinal: 100,
-                        providerThreadId: null,
-                        providerTurnId: null,
-                        parentItemId: null,
-                        nativeItemRef: null,
-                        startedAt: now,
-                        completedAt: now,
                         title: null,
+                        text: reply,
+                        streaming: false,
                       },
                     }
-                  : {
-                      ...scope,
-                      type: "message.updated",
-                      payload: {
-                        ...report,
-                        id: reportMessageId,
-                        role: "assistant",
-                        attachments: [],
-                        createdBy: "agent",
-                        creationSource: "server",
-                        createdAt: now,
-                      },
-                    },
+                  : scenario === "pruned hook stop"
+                    ? {
+                        ...scope,
+                        type: "turn-item.updated",
+                        payload: {
+                          ...resultItem(reportRun.id),
+                          id: hookStopId(reportRun.id),
+                          type: "system_notice",
+                          level: "warning",
+                          status: "completed",
+                          title: null,
+                          message: stopNotice,
+                        },
+                      }
+                    : scenario === "pruned interrupt result"
+                      ? {
+                          ...scope,
+                          type: "turn-item.updated",
+                          payload: {
+                            ...resultItem(reportRun.id),
+                            id: IdAllocator.derive.runSignalTurnItem({
+                              runId: reportRun.id,
+                              signal: "interrupt-result",
+                            }),
+                            type: "run_interrupt_result",
+                            status: "interrupted",
+                            title: null,
+                            message: interruptNotice,
+                          },
+                        }
+                      : scenario === "pruned error"
+                        ? {
+                            ...scope,
+                            type: "turn-item.updated",
+                            payload: {
+                              ...resultItem(reportRun.id),
+                              id: TurnItemId.make("item:pruned-inherited-error"),
+                              type: "error",
+                              status: "failed",
+                              title: null,
+                              failure: {
+                                class: "usage_limit",
+                                message: failure,
+                                code: "usageLimitExceeded",
+                                retryable: null,
+                              },
+                            },
+                          }
+                        : {
+                            ...scope,
+                            type: "message.updated",
+                            payload: {
+                              ...report,
+                              id: reportMessageId,
+                              role: "assistant",
+                              attachments: [],
+                              createdBy: "agent",
+                              creationSource: "server",
+                              createdAt: now,
+                            },
+                          },
               ],
             });
           }
           if (
             scenario === "early wake" ||
             scenario === "historical report" ||
-            scenario === "pruned turn item report"
+            scenario.startsWith("pruned ")
           ) {
             yield* eventSink.write({
               events: [
@@ -3520,7 +3632,9 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               .pipe(
                 Stream.filter(
                   ({ event }) =>
-                    event.id === (historical ? "event:historical-inherited-report" : reportEventId),
+                    !historical ||
+                    event.id === "event:historical-inherited-report" ||
+                    event.id === "event:historical-inherited-item",
                 ),
                 Stream.runHead,
               );
@@ -3535,11 +3649,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             (task) => task.id === currentTaskId,
           );
           assert.equal(settled?.status, "completed");
-          if (scenario === "historical report") {
-            assert.notInclude(settled?.result ?? "", "Historical report must not be borrowed.");
-          } else {
-            assert.equal(settled?.result, "The grandchild finished the next step.");
-          }
+          assert.equal(settled?.result, expectedReport);
           const final = yield* orchestrator.getThreadProjection(parentThreadId);
           let wake = yield* notifications.take;
           while (
@@ -3579,11 +3689,11 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           );
           assert.lengthOf(wakeMessages, 1);
           const wakeMessage = wakeMessages[0];
-          if (scenario === "historical report") {
-            assert.notInclude(wakeMessage?.text ?? "", "Historical report must not be borrowed.");
-          } else {
-            assert.include(wakeMessage?.text ?? "", "The grandchild finished the next step.");
-          }
+          const title = settled?.title == null ? "" : ` (${settled.title})`;
+          assert.equal(
+            wakeMessage?.text,
+            `Delegated task ${currentTaskId}${title} in child thread ${child.childThreadId} [completed]:\n${expectedReport}`,
+          );
         }),
     );
 

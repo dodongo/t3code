@@ -215,6 +215,7 @@ import {
   makeSubagentChildThread,
   SUBAGENT_RESULT_TURN_ITEM_TYPES,
   subagentResultForRun,
+  subagentStopNotice,
   delegatedTaskProgress,
   delegatedTaskReportRuns,
   monitorUpdateRunIds,
@@ -15761,7 +15762,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         terminalStatus === "completed" &&
         result.messageId === null &&
-        result.turnItemId === null
+        result.turnItemId === null &&
+        subagentStopNotice(childProjection, childRun) === undefined
       ) {
         const inheritedWakes = inheritedRuns
           .filter((run) => run.delegatedTaskId === undefined)
@@ -15781,7 +15783,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           );
           for (const run of inheritedWakes) {
             const report = subagentResultForRun({ ...reports, providerTurns: [] }, run);
-            if (report.messageId === null && report.turnItemId === null) continue;
+            if (
+              report.messageId === null &&
+              report.turnItemId === null &&
+              subagentStopNotice(reports, run) === undefined
+            )
+              continue;
             resultText = report.text;
             break;
           }

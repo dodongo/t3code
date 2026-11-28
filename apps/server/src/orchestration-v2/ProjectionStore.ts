@@ -98,6 +98,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { SUBAGENT_RESULT_TURN_ITEM_TYPES } from "@t3tools/provider-core/server/subagentProjection";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 
@@ -3255,7 +3256,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${updatedAt},
                 ${payloadJson},
                 ${event.payload.type === "dynamic_tool" && isInlineWorkOutput(payloadJson) ? 1 : 0},
-                ${event.payload.type === "assistant_message" ? (sequence ?? null) : null}
+                ${SUBAGENT_RESULT_TURN_ITEM_TYPES.some((type) => type === event.payload.type) ? (sequence ?? null) : null}
               )
               ON CONFLICT(turn_item_id)
               DO UPDATE SET
