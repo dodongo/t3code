@@ -33,6 +33,29 @@ describe(renderInheritedText, () => {
     );
   });
 
+  it("redacts quoted and nested-list HTML using authored offsets", () => {
+    const image = '<img src="file:///fixture/private.png" alt="synthetic alt">';
+    expect(renderInheritedText(`> <div>\n> text to preserve\n> ${image}\n> </div>\n\nAfter`)).toBe(
+      "> <div>\n> text to preserve\n> [Image omitted]\n> </div>\n\nAfter",
+    );
+    expect(
+      renderInheritedText(
+        `- Outer\n  - Inner\n\n    <div>\n    before\n    ${image}\n    after\n    </div>`,
+      ),
+    ).toBe(
+      "- Outer\n  - Inner\n\n    <div>\n    before\n    [Image omitted]\n    after\n    </div>",
+    );
+  });
+
+  it("preserves trailing prose after an unclosed picture and leaves video sources alone", () => {
+    const video = '<video><source src="file:///fixture/video.mp4"></video>';
+    const picture =
+      '<picture title="private title"><source srcset="data:image/png;base64,c3ludGhldGlj"><img src="file:///fixture/fallback.png" alt="private alt">';
+    expect(renderInheritedText(`${video}\n\n${picture} trailing prose\n\nMore prose`)).toBe(
+      `${video}\n\n[Image omitted] trailing prose\n\nMore prose`,
+    );
+  });
+
   it("omits image data from decoded citation text and comments", () => {
     const quote = "Quoted ![private alt](data:image/png;base64,c3ludGhldGlj)";
     const text = renderInheritedText(
