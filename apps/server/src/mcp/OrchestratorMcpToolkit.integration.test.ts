@@ -529,6 +529,13 @@ describe("orchestrator MCP toolkit", () => {
           expect(status).toMatchObject({ status: "cancelled", workState: "result_available" });
           expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
 
+          expect(
+            (yield* invoke("task_cancel", {
+              ...input,
+              clientRequestId: "recancel-queued-followup",
+            })).isError,
+          ).not.toBe(true);
+
           const childAfter = yield* orchestrator.getThreadProjection(childThreadId);
           expect(childAfter.runs.find((run) => run.id === running.id)).toEqual(running);
           expect(childAfter.runs.find((run) => run.id === other.runId)?.status).toBe("queued");

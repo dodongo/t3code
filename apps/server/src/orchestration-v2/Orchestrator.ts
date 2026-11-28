@@ -16145,6 +16145,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             if (
               Option.isNone(receipt) &&
               task !== undefined &&
+              taskRuns.length === 1 &&
+              onlyRun?.status === "cancelled" &&
+              onlyRun.startedAt === null &&
+              task.cancelledRunId === onlyRun.id
+            ) {
+              return { task };
+            }
+            if (
+              Option.isNone(receipt) &&
+              task !== undefined &&
               (isOrchestrationV2WorkActive(task.status) || task.status === "idle") &&
               taskRuns.length === 1 &&
               onlyRun?.status === "queued" &&
