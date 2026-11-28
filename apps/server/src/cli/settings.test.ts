@@ -85,12 +85,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
     [
       "rejects an unknown delegation profile field",
       '{"delegation":{"providerByVendor":{},"profiles":{"advisor":{"model":"openai:test","deniedSkills":[],"checkout":"shared","bogus":true}}}}',
-      "delegation.profiles.advisor.bogus",
+      "delegation.profiles.advisor: Unknown delegation profile field.",
     ],
     [
       "rejects an unknown delegation profile option",
       '{"delegation":{"providerByVendor":{},"profiles":{"advisor":{"model":"openai:test","deniedSkills":[],"checkout":"shared","options":{"bogus":"private-content"}}}}}',
-      "delegation.profiles.advisor.options.bogus",
+      "delegation.profiles.advisor.options: Unknown delegation profile field.",
     ],
     ["rejects malformed JSON", '{"private-content":', "valid JSON"],
     ["rejects invalid legacy provider settings", '{"providers":"private-content"}', "providers"],
