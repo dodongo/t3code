@@ -4,14 +4,14 @@ import { keepOrderedListNumbers, keepsOrderedListNumbers } from "./markdownOrder
 interface MarkdownPosition {
   readonly start?: {
     readonly line?: number;
-    readonly offset?: number;
+    readonly offset?: number | undefined;
   };
 }
 
 interface MarkdownAstNode {
   readonly type: string;
   readonly value?: unknown;
-  readonly position?: MarkdownPosition;
+  readonly position?: MarkdownPosition | undefined;
   children?: MarkdownAstNode[];
 }
 
