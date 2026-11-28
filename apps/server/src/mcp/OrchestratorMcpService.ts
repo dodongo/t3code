@@ -4704,18 +4704,19 @@ const make = Effect.gen(function* () {
                 profile.providerInstanceId,
               );
               if (route.instanceId === null) return;
-              const oldThinking = modelSelection.options?.[0]?.value;
-              const newThinking = profile.options?.thinking;
-              const sameModel = route.model === modelSelection.model && oldThinking === newThinking;
               const sameFamily =
                 route.driver === "antigravity" &&
-                typeof oldThinking === "string" &&
-                route.model === `${modelSelection.model}-${oldThinking}` &&
-                (newThinking === undefined || newThinking === oldThinking);
-              if (route.instanceId === modelSelection.instanceId && (sameModel || sameFamily))
+                modelSelection.options?.some(
+                  ({ value }) =>
+                    typeof value === "string" && route.model === `${modelSelection.model}-${value}`,
+                );
+              if (
+                route.instanceId === modelSelection.instanceId &&
+                (route.model === modelSelection.model || sameFamily)
+              )
                 return;
-              const old = `${modelSelection.model} (${modelSelection.instanceId}${oldThinking === undefined ? "" : `, thinking=${oldThinking}`})`;
-              const next = `${route.model} (${route.instanceId}${newThinking === undefined ? "" : `, thinking=${newThinking}`})`;
+              const old = `${modelSelection.model} (${modelSelection.instanceId})`;
+              const next = `${route.model} (${route.instanceId})`;
               return `This child runs ${old}; its profile now uses ${next}. Call delegate_task with profile ${delegationProfile} to switch it.`;
             }).pipe(Effect.orElseSucceed(() => undefined));
       return {
