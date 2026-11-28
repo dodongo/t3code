@@ -6858,6 +6858,7 @@ describe("OrchestratorMcpService live threads", () => {
     "option-only drift",
     "unprofiled",
     "normalized Antigravity",
+    "Antigravity thinking edit",
     "Antigravity drift",
   ] as const)(
     "sendToThread: keeps the child's model selection and reports profile drift (%s)",
@@ -6870,10 +6871,7 @@ describe("OrchestratorMcpService live threads", () => {
           ...(scenario === "unprofiled"
             ? {}
             : {
-                profile:
-                  scenario.endsWith("Antigravity") || scenario === "Antigravity drift"
-                    ? "antigravity"
-                    : "advisor",
+                profile: scenario.includes("Antigravity") ? "antigravity" : "advisor",
               }),
         });
         if (childThreadId === null) return yield* Effect.die("Expected a delegated child.");
@@ -6898,6 +6896,18 @@ describe("OrchestratorMcpService live threads", () => {
           assert.deepEqual(before.thread.modelSelection.options, [
             { id: "thought_level", value: "high" },
           ]);
+        }
+        if (scenario === "Antigravity thinking edit") {
+          yield* orchestration.dispatch({
+            type: "thread.model-selection.set",
+            commandId: CommandId.make("profile-send-thinking-edit"),
+            threadId: childThreadId,
+            modelSelection: {
+              ...before.thread.modelSelection,
+              options: [{ id: "thought_level", value: "medium" }],
+            },
+          });
+          yield* worker.drain();
         }
         if (scenario === "Antigravity drift") {
           const { delegation } = yield* serverSettings.getSettings;
@@ -6938,18 +6948,17 @@ describe("OrchestratorMcpService live threads", () => {
         }
 
         const message = "Review the follow-up.";
+        const saved = (yield* orchestration.getThreadProjection(childThreadId)).thread
+          .modelSelection;
         const sent = yield* service.sendToThread(scope, { threadId: childThreadId, message });
         const after = yield* orchestration.getThreadProjection(childThreadId);
         assert.equal(sent.delivery, "started");
-        assert.deepEqual(after.thread.modelSelection, before.thread.modelSelection);
+        assert.deepEqual(after.thread.modelSelection, saved);
         assert.sameMembers(
           after.runs.map(({ id }) => id),
           [childRunId, sent.runId],
         );
-        assert.deepEqual(
-          after.runs.find(({ id }) => id === sent.runId)?.modelSelection,
-          before.thread.modelSelection,
-        );
+        assert.deepEqual(after.runs.find(({ id }) => id === sent.runId)?.modelSelection, saved);
         assert.equal(after.messages.find(({ id }) => id === sent.messageId)?.text, message);
 
         assert.equal(

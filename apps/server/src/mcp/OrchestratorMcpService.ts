@@ -4704,15 +4704,15 @@ const make = Effect.gen(function* () {
                 profile.providerInstanceId,
               );
               if (route.instanceId === null) return;
-              const sameFamily =
-                route.driver === "antigravity" &&
-                modelSelection.options?.some(
-                  ({ value }) =>
-                    typeof value === "string" && route.model === `${modelSelection.model}-${value}`,
-                );
+              const provider = (yield* loadProviders).find(
+                ({ instanceId }) => instanceId === route.instanceId,
+              );
+              const family = (model: string) =>
+                (provider === undefined ? undefined : antigravitySuffixedModel(provider, model))
+                  ?.model ?? model;
               if (
                 route.instanceId === modelSelection.instanceId &&
-                (route.model === modelSelection.model || sameFamily)
+                family(route.model) === family(modelSelection.model)
               )
                 return;
               const old = `${modelSelection.model} (${modelSelection.instanceId})`;
