@@ -10,6 +10,7 @@ import type {
   ShellSnapshotOptions,
 } from "./ProjectionStore.ts";
 import {
+  type NodeId,
   type ChatAttachment,
   CommandId,
   isDelegatedAppThread,
@@ -552,6 +553,7 @@ export interface ThreadManagementServiceShape {
   >;
   readonly stopDelegatedTasks: (input: {
     readonly remoteDispatch?: Orchestrator.OrchestratorV2["Service"]["dispatch"];
+    readonly taskIds?: ReadonlyArray<NodeId>;
     readonly threadId: ThreadId;
     readonly commandId: CommandId;
     readonly reason?: string | undefined;
@@ -1815,7 +1817,11 @@ const make = Effect.gen(function* () {
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = Effect.fn(
     "ThreadManagementService.stopDelegatedTasks",
   )(function* (input) {
-    const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
+    const { subagents } = yield* orchestrator.getThreadRecords(
+      input.threadId,
+      ["subagents"],
+      input.taskIds === undefined ? undefined : { subagentIds: input.taskIds },
+    );
     const failures: Array<
       Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
     > = [];

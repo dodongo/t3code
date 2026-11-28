@@ -132,6 +132,7 @@ export interface EventSinkV2Shape {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    readonly followupOwnerTaskId?: NodeId;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
@@ -485,6 +486,46 @@ const layerBase: Layer.Layer<
       );
     });
 
+    const updateFollowupOwnership = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      ownerTaskId?: NodeId,
+    ) {
+      const tasks = events.flatMap((event) =>
+        event.type === "subagent.updated" ? [event.payload] : [],
+      );
+      const owner =
+        tasks.find((task) => task.id === ownerTaskId) ??
+        tasks.find(
+          (task) =>
+            task.result === null &&
+            task.origin === "app_owned" &&
+            task.childThreadId !== null &&
+            events.some(
+              (event) => event.type === "run.updated" && event.payload.delegatedTaskId === task.id,
+            ),
+        );
+      const settled = tasks.filter(
+        (task) => task.result !== null || task.cancelledRunId !== undefined,
+      );
+      for (const task of settled) {
+        if (
+          owner !== undefined &&
+          owner.id !== task.id &&
+          owner.childThreadId === task.childThreadId &&
+          task.status === "completed" &&
+          task.completionDelivery?.state === "disposed"
+        ) {
+          yield* sql`INSERT OR IGNORE INTO orchestration_v2_followup_ownership
+            (owner_task_id, source_task_id)
+            SELECT ${owner.id}, source_task_id FROM orchestration_v2_followup_ownership
+            WHERE owner_task_id = ${task.id}`;
+          yield* sql`INSERT OR IGNORE INTO orchestration_v2_followup_ownership
+            (owner_task_id, source_task_id) VALUES (${owner.id}, ${task.id})`;
+        }
+        yield* sql`DELETE FROM orchestration_v2_followup_ownership WHERE owner_task_id = ${task.id}`;
+      }
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -528,6 +569,7 @@ const layerBase: Layer.Layer<
             events: normalized,
           });
           const outcomes = yield* applyStoredEvents(committed);
+          yield* updateFollowupOwnership(normalized, input.followupOwnerTaskId);
           yield* effectOutbox.enqueue(input.effects);
           return { committed, outcomes };
         }).pipe(Effect.withTracerEnabled(false)),
@@ -859,6 +901,7 @@ const layerBase: Layer.Layer<
             );
           }
           const outcomes = yield* applyStoredEvents(storedEvents);
+          yield* updateFollowupOwnership(normalized);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,

@@ -2229,7 +2229,11 @@ const make = Effect.gen(function* () {
         ? progress.state
         : !isTerminalTaskStatus(taskStatusForRun(taskResultRun))
           ? "working"
-          : delegatedTaskAwaitsWork(followupRuns, childControls)
+          : delegatedTaskAwaitsWork(followupRuns, childControls) ||
+              (task.result === null &&
+                (yield* threadManagement
+                  .delegatedTaskResultPending(task.childThreadId, task.id, true)
+                  .pipe(Effect.mapError(threadManagementFailure))))
             ? "waiting_for_children"
             : "result_available";
     const completionPending =
@@ -4056,10 +4060,27 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.thread.threadId,
             taskId: input.taskId,
             command,
-            stopDescendants: (remoteDispatch) =>
-              (current.status === "queued" ? hasInterruptibleWork() : Effect.succeed(true)).pipe(
+            stopDescendants: (remoteDispatch, taskIds) =>
+              (current.status === "queued" && taskIds === undefined
+                ? hasInterruptibleWork()
+                : Effect.succeed(true)
+              ).pipe(
                 Effect.flatMap((eligible) =>
-                  eligible ? assertStoppable(childThreadId) : Effect.fail(noInterruptibleRun),
+                  !eligible
+                    ? Effect.fail(noInterruptibleRun)
+                    : taskIds === undefined
+                      ? assertStoppable(childThreadId)
+                      : loadThreadRecords(childThreadId, ["subagents"]).pipe(
+                          Effect.flatMap(({ subagents }) =>
+                            Effect.forEach(
+                              subagents.filter(
+                                (task) => taskIds.includes(task.id) && task.childThreadId !== null,
+                              ),
+                              (task) => assertStoppable(task.childThreadId!),
+                              { discard: true },
+                            ),
+                          ),
+                        ),
                 ),
                 Effect.andThen(
                   threadManagement.stopDelegatedTasks({
@@ -4067,6 +4088,7 @@ const make = Effect.gen(function* () {
                     commandId,
                     reason,
                     remoteDispatch,
+                    ...(taskIds === undefined ? {} : { taskIds }),
                   }),
                 ),
               ),
@@ -4152,6 +4174,16 @@ const make = Effect.gen(function* () {
         );
         return subagents.some((task) => task.id === input.taskId && task.status === "cancelled");
       }).pipe(Effect.mapError(threadManagementFailure));
+      if (
+        isTerminalTaskStatus(current.status) &&
+        parentTask?.completionDelivery?.state === "disposed" &&
+        parentTask.result !== null
+      ) {
+        return {
+          taskId: input.taskId,
+          status: current.status,
+        } satisfies OrchestratorMcpTaskCancelResult;
+      }
       if (isTerminalTaskStatus(current.status)) {
         // The child can still run work for another turn, so it is stopped either way.
         yield* stopWithinLimit;

@@ -1328,64 +1328,16 @@ describe("orchestrator MCP toolkit", () => {
           const parentBefore = yield* orchestrator.getThreadProjection(parentThreadId);
           const childBefore = yield* orchestrator.getThreadProjection(childThreadId);
           expect(childBefore.subagents).toHaveLength(1);
-          const input = {
-            taskId: queuedFollowup.taskId,
-            clientRequestId: "cancel-queued-followup",
-          };
-          expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
-          const statusCall = yield* invoke("task_status", { taskId: queuedFollowup.taskId });
-          const status = yield* decodeDelegateTaskResult(statusCall.structuredContent);
-          expect(status).toMatchObject({ status: "cancelled", workState: "result_available" });
-          expect((yield* invoke("task_cancel", input)).isError).not.toBe(true);
-
-          expect(
-            (yield* invoke("task_cancel", {
-              ...input,
-              clientRequestId: "recancel-queued-followup",
-            })).isError,
-          ).not.toBe(true);
-
+          const oldCancel = yield* invoke("task_cancel", { taskId: runningFollowup.taskId });
+          expect(oldCancel.isError).not.toBe(true);
+          const refused = yield* invoke("task_cancel", { taskId: queuedFollowup.taskId });
+          expect(refused.isError).toBe(true);
+          expect(JSON.stringify(refused.content)).toContain("The task remains open");
           const childAfter = yield* orchestrator.getThreadProjection(childThreadId);
-          expect(childAfter.runs.find((run) => run.id === running.id)).toEqual(running);
-          expect(childAfter.runs.find((run) => run.id === queuedFollowup.runId)?.status).toBe(
-            "cancelled",
-          );
+          expect(childAfter.runs).toEqual(childBefore.runs);
           expect(childAfter.subagents).toEqual(childBefore.subagents);
-          expect(childAfter.providerTurns).toEqual(childBefore.providerTurns);
           const parentAfter = yield* orchestrator.getThreadProjection(parentThreadId);
-          expect(parentAfter.runs).toEqual(parentBefore.runs);
-          expect(parentAfter.messages).toEqual(parentBefore.messages);
-          const unrelatedTasks = (task: { readonly id: string }) =>
-            task.id !== queuedFollowup.taskId;
-          expect(parentAfter.subagents.filter(unrelatedTasks)).toEqual(
-            parentBefore.subagents.filter(unrelatedTasks),
-          );
-          expect(
-            parentAfter.subagents.find((task) => task.id === queuedFollowup.taskId),
-          ).toMatchObject({
-            status: "cancelled",
-            cancelledRunId: queuedFollowup.runId,
-            completionDelivery: { state: "disposed" },
-          });
-          const otherCall = yield* invoke("t3_thread_send", {
-            threadId: childThreadId,
-            message: "Keep this unrelated turn in the queue.",
-            mode: "queue",
-            clientRequestId: "delegated-child-unrelated-queue",
-          });
-          const other = yield* decodeThreadSendResult(otherCall.structuredContent);
-          expect(
-            (yield* invoke("task_cancel", { ...input, taskId: other.taskId })).isError,
-          ).not.toBe(true);
-          const otherStatus = yield* invoke("task_status", { taskId: other.taskId });
-          expect(yield* decodeDelegateTaskResult(otherStatus.structuredContent)).toMatchObject({
-            status: "cancelled",
-          });
-          const afterOther = yield* orchestrator.getThreadProjection(parentThreadId);
-          expect(afterOther.subagents.find((task) => task.id === other.taskId)).toMatchObject({
-            cancelledRunId: other.runId,
-            completionDelivery: { state: "disposed" },
-          });
+          expect(parentAfter.subagents).toEqual(parentBefore.subagents);
           return;
         }
 

@@ -841,6 +841,10 @@ export interface ProjectionStoreV2Shape {
    * their wakes. `runsFloor` is set when older runs were left out; every run that ran after it is
    * in `runs`.
    */
+  readonly getInheritedFollowupIds: (
+    threadId: ThreadId,
+    taskId: NodeId,
+  ) => Effect.Effect<ReadonlyArray<NodeId>, ProjectionStoreV2Error>;
   readonly getDelegatedChildControls: (
     threadId: ThreadId,
     input: { readonly taskIds: ReadonlyArray<NodeId>; readonly windowSize: number },
@@ -5233,7 +5237,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
                   AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
                   ELSE 0 END
-                  AND (EXISTS (
+                  AND ((SELECT count(*) FROM orchestration_v2_projection_subagents AS followup
+                    WHERE followup.child_thread_id = child.thread_id
+                      AND followup.subagent_id <> json_extract(child.payload_json, '$.forkedFrom.nodeId')
+                      AND json_extract(followup.payload_json, '$.origin') = 'app_owned'
+                      AND json_extract(followup.payload_json, '$.result') IS NULL) > 1 OR EXISTS (
                     SELECT 1 FROM orchestration_v2_projection_runs AS requested
                     JOIN orchestration_v2_projection_subagents AS task
                       ON task.subagent_id = json_extract(requested.payload_json, '$.delegatedTaskId')
@@ -6660,6 +6668,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }),
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
+
+    const getInheritedFollowupIds: ProjectionStoreV2Shape["getInheritedFollowupIds"] = (
+      threadId,
+      taskId,
+    ) =>
+      sql<{ readonly source_task_id: string }>`
+        SELECT source_task_id FROM orchestration_v2_followup_ownership
+        WHERE owner_task_id = ${taskId}
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => NodeId.make(row.source_task_id))),
+        Effect.mapError(controlReadError(threadId)),
+      );
 
     const getDelegatedChildControls: ProjectionStoreV2Shape["getDelegatedChildControls"] = (
       threadId,
@@ -10054,6 +10074,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getCheckpointRollbackContext: readOnReader(getCheckpointRollbackContext),
       getRunMessage: readOnReader(getRunMessage),
       getDelegatedChildControls: readOnReader(getDelegatedChildControls),
+      getInheritedFollowupIds: readOnReader(getInheritedFollowupIds),
       getRun: readOnReader(getRun),
       canStartQueuedRun: readOnReader(canStartQueuedRun),
       getHeldQueuedRuns: readOnReader(getHeldQueuedRuns),

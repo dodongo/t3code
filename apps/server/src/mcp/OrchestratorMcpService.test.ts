@@ -337,10 +337,12 @@ describe("OrchestratorMcpService", () => {
                 ? parentProjection
                 : { ...childProjection, runs: childRuns },
             ),
-          delegatedTaskResultPending: () =>
-            readFails
-              ? Effect.fail(new OrchestratorProjectionError({ threadId: childThreadId }))
-              : Effect.succeed(awaitsRestart),
+          delegatedTaskResultPending: (_threadId, _taskId, workOnly) =>
+            workOnly
+              ? Effect.succeed(false)
+              : readFails
+                ? Effect.fail(new OrchestratorProjectionError({ threadId: childThreadId }))
+                : Effect.succeed(awaitsRestart),
           dispatch: () => Ref.update(dispatched, (count) => count + 1).pipe(Effect.as({} as never)),
         }),
         ServerSettings.layerTest(),
