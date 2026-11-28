@@ -76,6 +76,16 @@ describe(renderInheritedText, () => {
     );
   });
 
+  it("redacts same-line wide-list images without rewriting prose or literal code", () => {
+    const image = "![private alt](file:///fixture/private.png)";
+    expect(renderInheritedText(`Intro\n\n-      ${image}\n         following prose`)).toBe(
+      "Intro\n\n-      [Image omitted]\n         following prose",
+    );
+    const prose = "Intro\n\n-      ordinary prose\n         following prose";
+    const code = `- Example:\n\n      ${image}\n\n- \`\`\`md\n  ${image}\n  \`\`\``;
+    expect(renderInheritedText(`${prose}\n\n${code}`)).toBe(`${prose}\n\n${code}`);
+  });
+
   it("omits image data from decoded citation text and comments", () => {
     const quote = "Quoted ![private alt](data:image/png;base64,c3ludGhldGlj)";
     const text = renderInheritedText(
